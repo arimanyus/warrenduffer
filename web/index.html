@@ -3,54 +3,99 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Warren Duffer</title>
-  <style>
-    :root { color-scheme: dark; --bg:#0d1117; --card:#161b22; --bd:#30363d; --tx:#e6edf3; --mut:#8b949e; --g:#3fb950; --r:#f85149; --a:#d29922; }
-    * { box-sizing: border-box; }
-    body { margin:0; font: 13px/1.45 "Segoe UI", system-ui, sans-serif; background:var(--bg); color:var(--tx); }
-    header { display:flex; gap:12px; align-items:center; padding:10px 14px; border-bottom:1px solid var(--bd); flex-wrap:wrap; }
-    .pill { border:1px solid var(--bd); background:var(--card); padding:2px 8px; border-radius:999px; }
-    .g { color:var(--g); } .r { color:var(--r); } .a { color:var(--a); } .mut { color:var(--mut); }
-    button { background:#21262d; color:var(--tx); border:1px solid var(--bd); padding:4px 10px; cursor:pointer; }
-    button.kill { border-color:var(--r); color:var(--r); }
-    main { display:grid; grid-template-columns: 1fr 1fr; gap:12px; padding:12px; }
-    section { background:var(--card); border:1px solid var(--bd); padding:10px; overflow:auto; max-height:42vh; }
-    h2 { margin:0 0 8px; font-size:12px; text-transform:uppercase; color:var(--mut); }
-    table { width:100%; border-collapse:collapse; }
-    th, td { text-align:left; padding:3px 4px; border-bottom:1px solid #21262d; font-variant-numeric:tabular-nums; }
-    .bar { height:8px; background:#21262d; display:flex; }
-    .bar i { display:block; height:100%; }
-    .bar .l { background:var(--g); } .bar .s { background:var(--r); }
-  </style>
+  <title>WARREN DUFFER</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
+  <div class="crt"></div>
   <header>
-    <strong>Warren Duffer</strong>
-    <span id="mode" class="pill"></span>
-    <span id="model" class="pill"></span>
-    <span id="session" class="pill"></span>
-    <span id="lat" class="pill mut"></span>
-    <span id="skip" class="pill mut"></span>
+    <div class="brand">
+      <span class="prompt">&gt;</span> WARREN<span class="dim">_</span>DUFFER<span class="cursor">▌</span>
+    </div>
+    <nav class="tabs" id="tabs">
+      <button data-tab="live" class="on">LIVE</button>
+      <button data-tab="sessions">SESSIONS</button>
+    </nav>
+    <div class="pills">
+      <span id="mode" class="pill"></span>
+      <span id="model" class="pill"></span>
+      <span id="session" class="pill"></span>
+      <span id="warm" class="pill"></span>
+      <span id="lat" class="pill dim"></span>
+      <span id="skip" class="pill dim"></span>
+      <span id="clock" class="pill dim mono"></span>
+    </div>
+    <form class="cap" id="capForm">
+      <label for="capital">CAPITAL ₹</label>
+      <input id="capital" class="mono" type="number" min="1000" step="1000" />
+      <button type="submit">SET</button>
+      <span id="capMsg" class="dim"></span>
+    </form>
     <button class="kill" id="kill">KILL</button>
+    <button class="ghost" id="unkill" title="clear kill switch">RESUME</button>
   </header>
-  <div id="regime" style="padding:6px 14px;border-bottom:1px solid var(--bd)"></div>
-  <main>
-    <section>
-      <h2>Today</h2>
-      <div id="today"></div>
-      <div id="positions"></div>
+
+  <div id="replay" class="replay mono" hidden>
+    <span class="tag">REPLAY</span>
+    <span id="rpDate" class="bright"></span>
+    <span id="rpClock" class="bright"></span>
+    <button id="rpPlay">PAUSE</button>
+    <span class="dim">SPEED</span>
+    <span class="speeds" id="rpSpeeds"></span>
+    <div class="prog" id="rpProg" title="click to seek"><i></i></div>
+    <span id="rpPct" class="dim"></span>
+  </div>
+  <div id="regime" class="strip mono"></div>
+
+  <section id="sessions" class="panel sessions mono" data-title="SESSIONS" hidden>
+    <div class="dim" style="margin-bottom:8px">Days with 1-min bars in the live DB. Replay runs the real decision loop with simulated fills on its own port; the live engine is untouched.</div>
+    <div id="runningReplays"></div>
+    <table id="sessTable">
+      <thead><tr><th>DATE</th><th>BARS</th><th>SYMBOLS</th><th>LIVE TRADES</th><th>LIVE PNL</th><th>SPEED</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <div class="nums" id="nums"></div>
+
+  <main id="liveView">
+    <section class="panel chart" data-title="EQUITY CURVE">
+      <svg id="eq" viewBox="0 0 800 220" preserveAspectRatio="none"></svg>
+      <div id="chartMeta" class="dim mono"></div>
     </section>
-    <section>
-      <h2>Ranking</h2>
-      <div id="rank"></div>
+
+    <section class="panel" data-title="POSITIONS">
+      <div id="today" class="mono"></div>
+      <table id="pos" class="mono">
+        <thead><tr><th>SYM</th><th>SIDE</th><th>QTY</th><th>ENTRY</th><th>LTP</th><th>STOP</th><th>SL</th><th>NOTIONAL</th><th>uPNL</th><th>THESIS</th><th>MFE</th><th>MIN</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div id="orders" class="mono dim"></div>
     </section>
-    <section>
-      <h2>Trades</h2>
-      <table id="trades"><thead><tr><th>t</th><th>leg</th><th>sym</th><th>side</th><th>pnl</th><th>why</th><th>setup</th></tr></thead><tbody></tbody></table>
+
+    <section class="panel" data-title="JEV RANKING">
+      <div id="rank" class="mono"></div>
     </section>
-    <section>
-      <h2>Decisions</h2>
-      <table id="decs"><thead><tr><th>stage</th><th>sym</th><th>q</th><th>a</th><th>p</th><th>ms</th></tr></thead><tbody></tbody></table>
+
+    <section class="panel" data-title="TRADES">
+      <table id="trades" class="mono">
+        <thead><tr><th>T</th><th>LEG</th><th>SYM</th><th>SIDE</th><th>QTY</th><th>PNL</th><th>HOLD</th><th>WHY</th><th>ATTR</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="panel" data-title="LOG">
+      <div id="log" class="mono log"></div>
+    </section>
+
+    <section class="panel wide" data-title="JEV DECISIONS">
+      <table id="decs" class="mono">
+        <thead><tr><th>T</th><th>STAGE</th><th>SYM</th><th>Q</th><th>A</th><th>P</th><th>CONF</th><th>MS</th></tr></thead>
+        <tbody></tbody>
+      </table>
     </section>
   </main>
   <script src="/app.js"></script>

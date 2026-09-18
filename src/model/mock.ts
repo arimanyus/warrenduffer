@@ -1,6 +1,7 @@
 import { insertDecision } from "../db.js";
 import type { EvalResult, Model } from "./jev.js";
 import type { Question } from "./questions.js";
+import { clock } from "../time.js";
 
 export class MockModel implements Model {
   name = "mock";
@@ -32,7 +33,7 @@ export class MockModel implements Model {
     const latencyMs = Date.now() - t0;
     for (const [qk, a] of Object.entries(answers)) {
       insertDecision({
-        ts: Date.now(),
+        ts: clock.now(),
         stage,
         symbol,
         question: qk,

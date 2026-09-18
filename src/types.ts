@@ -151,6 +151,12 @@ export interface OpenPosition {
   entryOrderId: string | null;
   stopBps: number;
   thesis: number | null;
+  exitingAt: number;
+  closedQty: number;
+  exitNotional: number;
+  exitCost: number;
+  exitReason: string | null;
+  mfeBps: number;
 }
 
 export interface WorkingOrder {
@@ -168,6 +174,8 @@ export interface WorkingOrder {
   tag: string;
   placedAt: number;
   lastModifyAt: number;
+  filledQty: number;
+  requotes: number;
   decisionId: number | null;
   leg: Leg;
   tier: Tier;

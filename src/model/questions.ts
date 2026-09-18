@@ -47,6 +47,14 @@ export function stage1Questions(n: number): Record<string, Question> {
 
 export function stage1State(symbols: SymbolFeatures[], index: IndexFeatures | null): Record<string, unknown> {
   return {
+    time: new Date().toLocaleTimeString("en-GB", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }),
+    legend: {
+      vwapDist: "far_above|above|near|below|far_below, buckets from ATR",
+      m1_m60: "up|flat|down beyond ±8bps",
+      book: "buyers|balanced|sellers from total bid/ask qty",
+      flow5m: "approximate; from polled volume deltas signed by price change",
+      rvol: "today volume vs prior days to this minute",
+    },
     symbols: symbols.map(stage1SymbolState),
     index,
     breadth: index?.breadthAboveVwap ?? null,
@@ -109,7 +117,7 @@ export const positionQuestions: Record<string, Question> = {
   take_profit: {
     type: "noul",
     instructions:
-      "Should this `position` take profit now from the current state? The move in its direction is done or fading. Judge only what is visible. Do not forecast.",
+      "Should `position` be closed now to bank its gain? Yes when `position.unrealisedBps` is positive and the move is done or fading: `givebackFromPeakBps` growing, `flow5m` and `book` no longer favour the position, `bars1m` losing momentum, or `symbol` is far from VWAP with flow opposing. No when the move is still orderly and one-sided. Judge only what is visible. Do not forecast.",
   },
 };
 

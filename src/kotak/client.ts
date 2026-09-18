@@ -62,6 +62,8 @@ export class KotakClient {
   session: Session | null = null;
   lastOk = Date.now();
   readonly limiter = new RateLimiter();
+  /** Called with every raw response; used by scripts/probe.ts to verify field names. */
+  onRaw?: (endpoint: string, body: unknown) => void;
   private scrips = new Map<string, Instrument>();
   private foScrips: Instrument[] = [];
   private relogging = false;
@@ -296,10 +298,15 @@ export class KotakClient {
       body: form({ jData: JSON.stringify(jData) }),
       order: true,
     });
-    const available = Number(pick(res, ["data.avlCash", "data.avlMrgn", "avlCash"]) ?? 0);
-    const required = Number(pick(res, ["data.ordMrgn", "data.reqdMrgn", "data.totMrgnUsd"]) ?? 0);
+    const availRaw = pick(res, ["data.avlCash", "data.avlMrgn", "avlCash"]);
+    const reqRaw = pick(res, ["data.ordMrgn", "data.reqdMrgn", "data.totMrgnUsd"]);
     const rms = String(pick(res, ["data.rmsVldtd", "data.stat"]) ?? "");
-    return { available, required, ok: rms.toUpperCase() === "OK" || available >= required, raw: res };
+    const insuf = Number(pick(res, ["data.insufFund"]) ?? 0);
+    const available = Number(availRaw ?? NaN);
+    const required = Number(reqRaw ?? NaN);
+    const parsed = Number.isFinite(available) && Number.isFinite(required);
+    const ok = parsed && rms.toUpperCase() === "OK" && insuf <= 0 && available >= required;
+    return { available: parsed ? available : 0, required: parsed ? required : Infinity, ok, raw: res };
   }
 
   async place(args: {
@@ -344,23 +351,36 @@ export class KotakClient {
 
   async modify(args: {
     orderId: string;
+    segment: string;
+    tradingSymbol: string;
+    token?: string;
+    side: Side;
     qty: number;
     price: number;
     trigger?: number;
     orderType?: "L" | "SL-L";
+    product?: string;
     validity?: string;
   }): Promise<unknown> {
     const sess = await this.ensureSession();
     await this.limiter.takeOrder();
-    const jData = {
+    const jData: Record<string, string> = {
       no: args.orderId,
+      es: args.segment,
+      ts: args.tradingSymbol,
+      tt: args.side === "buy" ? "B" : "S",
       qt: String(args.qty),
       pr: String(args.price),
       tp: String(args.trigger ?? 0),
       pt: args.orderType ?? "L",
-      rt: args.validity ?? "DAY",
-      tt: "M",
+      pc: args.product ?? "MIS",
+      vd: args.validity ?? "DAY",
+      dq: "0",
+      mp: "0",
+      am: "NO",
+      dd: "NA",
     };
+    if (args.token) jData.tk = args.token;
     return this.authed("POST", `${sess.baseUrl}/quick/order/vr/modify`, {
       headers: this.sessionFormHeaders(),
       body: form({ jData: JSON.stringify(jData) }),
@@ -390,7 +410,7 @@ export class KotakClient {
       const r = row as Record<string, unknown>;
       return {
         orderId: String(r.nOrdNo ?? r.norentm ?? r.orderId ?? ""),
-        symbol: String(r.trdSym ?? r.ts ?? r.tradingSymbol ?? ""),
+        symbol: String(r.trdSym ?? r.ts ?? r.tradingSymbol ?? "").replace(/-EQ$/i, ""),
         status: String(r.ordSt ?? r.status ?? r.st ?? ""),
         qty: Number(r.qty ?? r.qt ?? 0),
         filledQty: Number(r.fldQty ?? r.filledQty ?? 0),
@@ -415,7 +435,7 @@ export class KotakClient {
       const buy = Number(r.flBuyQty ?? r.buyQty ?? 0);
       const sell = Number(r.flSellQty ?? r.sellQty ?? 0);
       return {
-        symbol: String(r.trdSym ?? r.ts ?? r.tradingSymbol ?? ""),
+        symbol: String(r.trdSym ?? r.ts ?? r.tradingSymbol ?? "").replace(/-EQ$/i, ""),
         token: String(r.tok ?? r.tk ?? r.token ?? ""),
         segment: String(r.exSeg ?? r.es ?? "nse_cm"),
         qty: buy - sell || Number(r.netQty ?? r.qty ?? 0),
@@ -488,6 +508,7 @@ export class KotakClient {
     } catch {
       json = { text };
     }
+    this.onRaw?.(url.replace(/^https?:\/\/[^/]+/, "").split("?")[0], json);
     if (res.status === 403) throw new KotakError("session expired", 403, json);
     if (!res.ok) throw new KotakError(`kotak ${res.status}`, res.status, json);
     const code = pick(json, ["stCode", "data.stCode", "stat"]);

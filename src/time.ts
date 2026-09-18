@@ -1,10 +1,19 @@
 const IST = "Asia/Kolkata";
 
-export function nowMs(): number {
-  return Date.now();
+/** Every trading-path timestamp reads this. Replay swaps it for a virtual clock. */
+export const clock = { now: (): number => Date.now() };
+
+export function useVirtualClock(startMs: number): { set: (ms: number) => void } {
+  let t = startMs;
+  clock.now = () => t;
+  return { set: (ms: number) => (t = ms) };
 }
 
-export function istParts(ms = Date.now()): {
+export function nowMs(): number {
+  return clock.now();
+}
+
+export function istParts(ms = clock.now()): {
   y: number;
   m: number;
   d: number;
@@ -36,22 +45,22 @@ export function istParts(ms = Date.now()): {
   };
 }
 
-export function istDateStr(ms = Date.now()): string {
+export function istDateStr(ms = clock.now()): string {
   const p = istParts(ms);
   return `${p.y}-${pad(p.m)}-${pad(p.d)}`;
 }
 
-export function istTimeStr(ms = Date.now()): string {
+export function istTimeStr(ms = clock.now()): string {
   const p = istParts(ms);
   return `${pad(p.hh)}:${pad(p.mm)}:${pad(p.ss)}`;
 }
 
-export function minutesOfDay(ms = Date.now()): number {
+export function minutesOfDay(ms = clock.now()): number {
   const p = istParts(ms);
   return p.hh * 60 + p.mm;
 }
 
-export function isWeekday(ms = Date.now()): boolean {
+export function isWeekday(ms = clock.now()): boolean {
   const w = istParts(ms).weekday;
   return w !== "Sat" && w !== "Sun";
 }

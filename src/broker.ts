@@ -1,0 +1,52 @@
+import type { BrokerOrder, BrokerPosition, MarginCheck, PlaceResult, Session } from "./kotak/client.js";
+import type { Instrument, OptionContract, Quote, Side } from "./types.js";
+
+/** The subset of KotakClient the engine, feed and executor depend on. SimBroker implements it for replay. */
+export interface Broker {
+  session: Session | null;
+  lastOk: number;
+  login(): Promise<Session>;
+  loadScrips(): Promise<void>;
+  getInstrument(symbol: string): Instrument | undefined;
+  allCash(): Instrument[];
+  quotes(tokens: { token: string; segment: string }[]): Promise<Quote[]>;
+  candles(token: string, segment: string, from: string, to: string, interval?: string): Promise<
+    { ts: number; open: number; high: number; low: number; close: number; volume: number }[]
+  >;
+  expiries(underlying?: string): Promise<string[]>;
+  optionChain(underlying?: string, expiry?: string): Promise<OptionContract[]>;
+  marginRequired(args: {
+    segment: string;
+    token: string;
+    tradingSymbol: string;
+    side: Side;
+    qty: number;
+    price: number;
+  }): Promise<MarginCheck>;
+  place(args: {
+    segment: string;
+    tradingSymbol: string;
+    token?: string;
+    side: Side;
+    qty: number;
+    price: number;
+    orderType?: "L" | "SL-L";
+    trigger?: number;
+    product?: string;
+    tag: string;
+  }): Promise<PlaceResult>;
+  modify(args: {
+    orderId: string;
+    segment: string;
+    tradingSymbol: string;
+    token?: string;
+    side: Side;
+    qty: number;
+    price: number;
+    trigger?: number;
+    orderType?: "L" | "SL-L";
+  }): Promise<unknown>;
+  cancel(orderId: string): Promise<unknown>;
+  orders(): Promise<BrokerOrder[]>;
+  positions(): Promise<BrokerPosition[]>;
+}

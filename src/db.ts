@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
 import { cfg } from "./config.js";
-import { istDateStr } from "./time.js";
+import { clock, istDateStr } from "./time.js";
 import type { DecisionRow, GovernorState } from "./types.js";
 
 mkdirSync(dirname(cfg.dbPath) === "." ? "data" : dirname(cfg.dbPath), { recursive: true });
@@ -160,10 +160,41 @@ CREATE TABLE IF NOT EXISTS events (
   kind TEXT,
   message TEXT
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `);
 
+export function getSetting(key: string, fallback: string): string {
+  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | undefined;
+  return row?.value ?? fallback;
+}
+
+export function setSetting(key: string, value: string): void {
+  db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, value);
+}
+
+export function getCapital(): number {
+  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get("capital") as { value: string } | undefined;
+  if (!row) {
+    setSetting("capital", String(cfg.capital));
+    return cfg.capital;
+  }
+  const n = Number(row.value);
+  return Number.isFinite(n) ? Math.max(1000, Math.min(n, 50_000_000)) : cfg.capital;
+}
+
+export function setCapital(n: number): number {
+  const v = Math.max(1000, Math.min(Math.round(n), 50_000_000));
+  setSetting("capital", String(v));
+  insertEvent("capital", `capital set to ${v}`);
+  return v;
+}
+
 export function insertEvent(kind: string, message: string): void {
-  db.prepare("INSERT INTO events (ts, kind, message) VALUES (?, ?, ?)").run(Date.now(), kind, message);
+  db.prepare("INSERT INTO events (ts, kind, message) VALUES (?, ?, ?)").run(clock.now(), kind, message);
 }
 
 export function insertSnapshot(s: {
@@ -188,7 +219,7 @@ export function insertSnapshot(s: {
 }
 
 export function pruneSnapshots(olderThanMs: number): void {
-  db.prepare("DELETE FROM snapshots WHERE ts < ?").run(Date.now() - olderThanMs);
+  db.prepare("DELETE FROM snapshots WHERE ts < ?").run(clock.now() - olderThanMs);
 }
 
 export function upsertBar(b: {
@@ -291,7 +322,7 @@ export function latencyP50(): number {
 }
 
 export function skippedCountToday(): number {
-  const start = Date.now() - 20 * 3600_000;
+  const start = clock.now() - 20 * 3600_000;
   const row = db
     .prepare("SELECT COUNT(*) AS c FROM events WHERE kind = 'skip' AND ts > ?")
     .get(start) as { c: number };
@@ -325,6 +356,75 @@ export function contextFor(date: string): Map<string, { exclude: boolean; forbid
     forbid_side: string | null;
   }[];
   return new Map(rows.map((r) => [r.symbol, { exclude: !!r.exclude, forbidSide: r.forbid_side }]));
+}
+
+export function latencyP90(): number {
+  const rows = db.prepare("SELECT latency_ms FROM decisions ORDER BY id DESC LIMIT 200").all() as { latency_ms: number }[];
+  if (!rows.length) return 0;
+  const s = [...rows].sort((a, b) => a.latency_ms - b.latency_ms);
+  return s[Math.floor(s.length * 0.9)]?.latency_ms ?? 0;
+}
+
+export function tokensToday(): number {
+  const start = clock.now() - 20 * 3600_000;
+  const row = db.prepare("SELECT COALESCE(SUM(tokens),0) AS t FROM decisions WHERE ts > ?").get(start) as { t: number };
+  return row.t;
+}
+
+export function computeStats(): {
+  netPnl: number;
+  todayPnl: number;
+  trades: number;
+  todayTrades: number;
+  wins: number;
+  todayWins: number;
+  hit: number;
+  todayHit: number;
+  expectancy: number;
+  profitFactor: number;
+  maxDd: number;
+  avgHoldS: number;
+  avgWin: number;
+  avgLoss: number;
+  friction: number;
+  curve: { t: number; eq: number }[];
+} {
+  const trades = allTrades();
+  const today = istDateStr();
+  const day = trades.filter((t) => t.date === today);
+  const wins = trades.filter((t) => t.pnl > 0);
+  const losses = trades.filter((t) => t.pnl < 0);
+  const dayWins = day.filter((t) => t.pnl > 0);
+  const gp = wins.reduce((s, t) => s + t.pnl, 0);
+  const gl = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
+  let eq = 0;
+  let peak = 0;
+  let dd = 0;
+  const curve: { t: number; eq: number }[] = [{ t: trades[0]?.opened_at ?? clock.now(), eq: 0 }];
+  for (const t of trades) {
+    eq += t.pnl;
+    peak = Math.max(peak, eq);
+    dd = Math.min(dd, eq - peak);
+    curve.push({ t: t.closed_at, eq });
+  }
+  return {
+    netPnl: eq,
+    todayPnl: day.reduce((s, t) => s + t.pnl, 0),
+    trades: trades.length,
+    todayTrades: day.length,
+    wins: wins.length,
+    todayWins: dayWins.length,
+    hit: trades.length ? wins.length / trades.length : 0,
+    todayHit: day.length ? dayWins.length / day.length : 0,
+    expectancy: trades.length ? eq / trades.length : 0,
+    profitFactor: gl > 0 ? gp / gl : gp > 0 ? 99 : 0,
+    maxDd: dd,
+    avgHoldS: trades.length ? trades.reduce((s, t) => s + t.hold_s, 0) / trades.length : 0,
+    avgWin: wins.length ? gp / wins.length : 0,
+    avgLoss: losses.length ? losses.reduce((s, t) => s + t.pnl, 0) / losses.length : 0,
+    friction: trades.reduce((s, t) => s + t.friction, 0),
+    curve,
+  };
 }
 
 export function allTrades(): {

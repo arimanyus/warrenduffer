@@ -10,6 +10,8 @@
     "report": "tsx scripts/report.ts",
     "gates": "tsx scripts/gates.ts",
     "smoke": "tsx scripts/smoke.ts",
+    "probe": "tsx scripts/probe.ts",
+    "replay": "tsx scripts/replay.ts",
     "typecheck": "tsc --noEmit"
   },
   "engines": {

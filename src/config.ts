@@ -94,6 +94,12 @@ export const cfg = {
   port: num("PORT", 8080),
   killPath: str("KILL_PATH", "kill.switch"),
   liveQty: num("LIVE_QTY", 0),
+  capital: num("CAPITAL", 100000),
+  riskPct: num("RISK_PCT", 0.003),
+  jevTimeoutMs: num("JEV_TIMEOUT_MS", 2500),
+  allowMockTrading: str("ALLOW_MOCK_TRADING") === "1",
+  warmupDays: num("WARMUP_DAYS", 25),
+  maxRequotes: num("MAX_REQUOTES", 3),
 };
 
 export const ENTRY_START_MIN = 9 * 60 + 30;

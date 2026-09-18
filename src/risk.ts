@@ -10,10 +10,16 @@ export function stopBps(atr1m: number, price: number): number | null {
   return clamp(s, risk.minStopBps, risk.maxStopBps);
 }
 
-export function sizeQty(price: number, stopBpsV: number, tier: Tier): number {
-  if (cfg.liveQty > 0) return Math.max(1, Math.floor(cfg.liveQty));
-  const riskQty = cfg.riskPerTrade / ((stopBpsV * price) / 1e4);
-  const notionalQty = cfg.maxNotional / price;
+/** Rupee risk per trade scales with the capital box; RISK_PER_TRADE is the floor. */
+export function riskPerTrade(capital: number): number {
+  return Math.max(cfg.riskPerTrade, capital * cfg.riskPct);
+}
+
+export function sizeQty(price: number, stopBpsV: number, tier: Tier, remainingCapital: number, capital: number): number {
+  if (remainingCapital < price) return 0;
+  if (cfg.liveQty > 0) return Math.max(0, Math.min(Math.floor(cfg.liveQty), Math.floor(remainingCapital / price)));
+  const riskQty = riskPerTrade(capital) / ((stopBpsV * price) / 1e4);
+  const notionalQty = Math.min(cfg.maxNotional, remainingCapital) / price;
   const mult = tier === "A" ? 1 : 0.5;
   return Math.max(0, Math.floor(Math.min(riskQty, notionalQty) * mult));
 }
@@ -45,6 +51,10 @@ export function entriesUsed(): number {
 
 export function optionLossToday(trades: { leg: string; pnl: number }[]): number {
   return trades.filter((t) => t.leg === "options").reduce((s, t) => s + t.pnl, 0);
+}
+
+export function positionNotional(pos: OpenPosition): number {
+  return pos.qty * pos.entryPrice;
 }
 
 export function unrealized(pos: OpenPosition, q: Quote): number {

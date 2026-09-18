@@ -2,6 +2,7 @@ import { experimental_evaluate as evaluate } from "ai";
 import { cfg } from "../config.js";
 import { insertDecision } from "../db.js";
 import type { Question } from "./questions.js";
+import { clock } from "../time.js";
 
 export interface EvalAnswer {
   type: string;
@@ -20,7 +21,7 @@ export interface EvalResult {
   ok: boolean;
 }
 
-const TIMEOUT_MS = 1500;
+const TIMEOUT_MS = cfg.jevTimeoutMs;
 
 export interface Model {
   name: string;
@@ -48,7 +49,7 @@ export class JevModel implements Model {
     } catch {
       const latencyMs = Date.now() - t0;
       insertDecision({
-        ts: Date.now(),
+        ts: clock.now(),
         stage,
         symbol,
         question: "_error",
@@ -139,7 +140,7 @@ function persist(parsed: Omit<EvalResult, "latencyMs" | "ok">, stage: string, sy
     const answer = a.choice ?? (a.score !== undefined ? String(a.score) : a.noul !== undefined ? String(a.noul) : "");
     const probability = a.noul ?? (a.choice && a.probabilities ? a.probabilities[a.choice] : null) ?? null;
     insertDecision({
-      ts: Date.now(),
+      ts: clock.now(),
       stage,
       symbol,
       question: q,

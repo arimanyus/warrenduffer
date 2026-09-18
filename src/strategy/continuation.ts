@@ -4,6 +4,7 @@ import { stage2State } from "../data/features.js";
 import type { EvalResult, Model } from "../model/index.js";
 import { stage1Questions, stage1State, stage2Questions } from "../model/questions.js";
 import type { IndexFeatures, Regime, Setup, SymbolFeatures, Tier } from "../types.js";
+import { clock } from "../time.js";
 
 export interface Ranked {
   symbol: string;
@@ -54,9 +55,9 @@ export async function runStage1(
   const regime = (r.answers.regime?.choice as Regime) || "range";
   const topL = longs.slice(0, 3);
   const topS = shorts.slice(0, 3);
-  insertRanking(Date.now(), "long", topL);
-  insertRanking(Date.now(), "short", topS);
-  insertRanking(Date.now(), "regime", { regime, riskOff: r.answers.risk_off?.noul });
+  insertRanking(clock.now(), "long", topL);
+  insertRanking(clock.now(), "short", topS);
+  insertRanking(clock.now(), "regime", { regime, riskOff: r.answers.risk_off?.noul });
   let keepL = topL;
   let keepS = topS;
   if (regime === "trend_up") keepS = [];

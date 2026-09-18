@@ -1,5 +1,6 @@
 import { insertGovernor, todayEntries, todayFriction, todayPnl, trailingTrades } from "../db.js";
 import type { GovernorState } from "../types.js";
+import { clock } from "../time.js";
 
 const UNLIMITED = -1;
 
@@ -31,7 +32,7 @@ export function computeGovernor(): GovernorState {
     todayPnl: pnl,
     consecutiveLosses,
   };
-  insertGovernor({ ts: Date.now(), ...state });
+  insertGovernor({ ts: clock.now(), ...state });
   return state;
 }
 

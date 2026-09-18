@@ -1,4 +1,4 @@
-import type { Leg, OpenPosition, PositionSide, Quote, Side, Tier, WorkingOrder } from "../types.js";
+import type { Leg, PositionSide, Quote, Side, Tier, WorkingOrder } from "../types.js";
 
 export interface PlaceIntent {
   symbol: string;
@@ -20,19 +20,22 @@ export interface PlaceIntent {
   stopBps?: number;
 }
 
+export interface Fill {
+  order: WorkingOrder;
+  qty: number;
+  price: number;
+  cost: number;
+}
+
 export interface Executor {
   name: string;
   orders: Map<number, WorkingOrder>;
   place(intent: PlaceIntent): Promise<WorkingOrder>;
-  modify(order: WorkingOrder, price: number, trigger?: number): Promise<void>;
+  modify(order: WorkingOrder, price: number, trigger?: number, qty?: number): Promise<void>;
   cancel(order: WorkingOrder): Promise<void>;
+  cancelAll(kind?: "entry" | "stop" | "exit"): Promise<void>;
   tick(quotes: Map<string, Quote>): Promise<void>;
-  onFill?: (fill: {
-    order: WorkingOrder;
-    qty: number;
-    price: number;
-    cost: number;
-  }) => void;
+  onFill?: (fill: Fill) => void;
 }
 
 export function opposite(side: PositionSide): Side {
