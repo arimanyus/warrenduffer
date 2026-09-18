@@ -18,6 +18,7 @@ export interface PlaceIntent {
   stop?: number;
   target?: number;
   stopBps?: number;
+  tif?: "MKT" | "LMT";
 }
 
 export interface Fill {

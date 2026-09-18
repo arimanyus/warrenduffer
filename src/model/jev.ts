@@ -41,13 +41,17 @@ export class JevModel implements Model {
     // Whole evaluate() must finish inside TIMEOUT_MS, including one retry on a transient gateway 5xx.
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
+    // Hard deadline independent of the SDK honouring the signal: a hung call must never stall the loop.
+    const deadline = new Promise<never>((_, reject) => {
+      ac.signal.addEventListener("abort", () => reject(new Error(`JevTimeout: no answer in ${TIMEOUT_MS}ms`)), { once: true });
+    });
     try {
       let raw: unknown;
       try {
-        raw = await this.call(state, questions, ac.signal);
+        raw = await Promise.race([this.call(state, questions, ac.signal), deadline]);
       } catch (e) {
         if (!isTransient(e) || ac.signal.aborted || Date.now() - t0 > TIMEOUT_MS * 0.5) throw e;
-        raw = await this.call(state, questions, ac.signal);
+        raw = await Promise.race([this.call(state, questions, ac.signal), deadline]);
       }
       const latencyMs = Date.now() - t0;
       const parsed = normalize(raw);
@@ -151,6 +155,7 @@ function normalize(raw: unknown): Omit<EvalResult, "latencyMs" | "ok"> {
 }
 
 function persist(parsed: Omit<EvalResult, "latencyMs" | "ok">, stage: string, symbol: string | null, latencyMs: number): void {
+  let first = true;
   for (const [q, a] of Object.entries(parsed.answers)) {
     const answer = a.choice ?? (a.score !== undefined ? String(a.score) : a.noul !== undefined ? String(a.noul) : "");
     const probability = a.noul ?? (a.choice && a.probabilities ? a.probabilities[a.choice] : null) ?? null;
@@ -163,8 +168,9 @@ function persist(parsed: Omit<EvalResult, "latencyMs" | "ok">, stage: string, sy
       probability,
       confidence: a.confidence ?? null,
       latencyMs,
-      tokens: parsed.tokens,
+      tokens: first ? parsed.tokens : 0,
       modelId: parsed.modelId,
     });
+    first = false;
   }
 }

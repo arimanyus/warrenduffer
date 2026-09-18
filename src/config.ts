@@ -108,8 +108,14 @@ export const cfg = {
   maxRequotes: num("MAX_REQUOTES", 3),
 };
 
-export const ENTRY_START_MIN = 9 * 60 + 30;
-export const ENTRY_END_MIN = 14 * 60 + 30;
-export const FLATTEN_MIN = 15 * 60 + 10;
+function hhmm(name: string, fallback: string): number {
+  const [h, m] = str(name, fallback).split(":").map(Number);
+  return h * 60 + (m || 0);
+}
+
+/** Entry window in IST. Default 09:30–15:00; the 15:10 flatten is the hard stop for MIS. */
+export const ENTRY_START_MIN = hhmm("ENTRY_START", "09:30");
+export const ENTRY_END_MIN = hhmm("ENTRY_END", "15:00");
+export const FLATTEN_MIN = hhmm("FLATTEN_AT", "15:10");
 export const MARKET_OPEN_MIN = 9 * 60 + 15;
 export const MARKET_CLOSE_MIN = 15 * 60 + 30;

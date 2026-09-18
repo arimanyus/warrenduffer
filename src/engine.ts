@@ -10,7 +10,7 @@ import { contextFor, db, getCapital, getWild, insertEvent, openSession, pruneSna
 import { LiveExecutor } from "./executor/live.js";
 import type { Executor, Fill } from "./executor/types.js";
 import type { Broker } from "./broker.js";
-import { estimateEntryFriction, fillCost } from "./kotak/costs.js";
+import { fillCost } from "./kotak/costs.js";
 import { INDEX_SYMBOL, INDEX_TOKEN, NIFTY50 } from "./kotak/scrip.js";
 import { createModel, type Model } from "./model/index.js";
 import { attributionQuestions } from "./model/questions.js";
@@ -60,6 +60,8 @@ export class Engine {
   feed: LiveFeed;
   readonly canTrade: boolean;
   readonly replay: boolean;
+  /** Replay seek: fills, stops and flatten only; no Jev, no universe rebuild. */
+  seeking = false;
   private fastBusy = false;
   private deciding = false;
 
@@ -76,6 +78,7 @@ export class Engine {
       client,
       () => this.universeTokens(),
       () => this.activeTokens(),
+      !this.replay,
       !this.replay,
     );
   }
@@ -173,7 +176,7 @@ export class Engine {
       this.fastBusy = false;
     }
     // Jev paused: no entry scans, no Jev exits. Stops, fills, flatten and kill keep running in the fast loop.
-    if (this.jevPaused) return;
+    if (this.jevPaused || this.seeking) return;
     // Hold / sell / breakeven on open positions: its own faster cadence, independent of entry scans.
     const posMs = cfg.positionIntervalS * 1000;
     if (!this.managing && this.positions.size && clock.now() - this.lastPositionCheck >= posMs) {
@@ -211,13 +214,18 @@ export class Engine {
   private async managePositions(): Promise<void> {
     if (this.killed || !this.client.session) return;
     const index = this.lastIndex;
-    for (const pos of [...this.positions.values()]) {
-      if (pos.closedQty >= pos.qty) continue;
-      const q = this.quotes.get(pos.symbol);
-      const f = q ? buildFeatures(pos.symbol, q) : null;
-      if (!q || !f) continue;
-      const u = unrealized(pos, q);
-      const d = await managePosition(this.model, pos, f, index, u);
+    // One Jev call per position, all in flight at once; act on the answers in order.
+    const asked = [...this.positions.values()]
+      .filter((pos) => pos.closedQty < pos.qty)
+      .map((pos) => {
+        const q = this.quotes.get(pos.symbol);
+        const f = q ? buildFeatures(pos.symbol, q) : null;
+        if (!q || !f) return null;
+        return { pos, verdict: managePosition(this.model, pos, f, index, unrealized(pos, q)) };
+      })
+      .filter((x) => x !== null);
+    for (const { pos, verdict } of asked) {
+      const d = await verdict;
       pos.thesis = d.thesis;
       db.prepare("UPDATE positions SET thesis=? WHERE id=?").run(d.thesis, pos.id);
       const wantsOut = d.action === "exit" || d.action === "take_profit";
@@ -275,7 +283,7 @@ export class Engine {
     }
     await this.manageEntries();
     await this.hardExits();
-    if (clock.now() - this.lastUniverseRebuild > 60_000) this.rebuildUniverse();
+    if (!this.seeking && clock.now() - this.lastUniverseRebuild > 60_000) this.rebuildUniverse();
     if (cfg.optionsMode === "on" && clock.now() - this.lastChain > 60_000) {
       this.lastChain = clock.now();
       try {
@@ -321,7 +329,7 @@ export class Engine {
 
     const inWindow = minutesOfDay() >= ENTRY_START_MIN && minutesOfDay() <= ENTRY_END_MIN;
     if (!inWindow) {
-      this.lastSkipReason = "outside entry window";
+      this.lastSkipReason = `outside entry window ${fmtMin(ENTRY_START_MIN)}–${fmtMin(ENTRY_END_MIN)} (ENTRY_START/ENTRY_END in .env)`;
       return;
     }
     if (s1.riskOff >= risk.riskOffHalt) {
@@ -478,6 +486,7 @@ export class Engine {
         stop,
         target,
         stopBps: sb,
+        tif: this.wild ? "MKT" : "LMT",
       });
       this.lastSkipReason = "";
     } catch {
@@ -682,6 +691,7 @@ export class Engine {
         decisionId: pos.decisionId,
         leg: pos.leg,
         tier: pos.tier,
+        tif: reason === "flatten" || reason === "halt" || reason === "kill" ? "MKT" : "LMT",
       });
       pos.stopOrderId = null;
     } catch {
@@ -738,6 +748,7 @@ export class Engine {
     if (this.killed || this.halted) return;
     for (const o of [...this.exec.orders.values()]) {
       if (o.kind !== "entry") continue;
+      if (this.wild || o.tif === "MKT") continue;
       const q = this.quotes.get(o.symbol);
       if (!q) continue;
       const tick = q.tickSize || 0.05;
@@ -764,7 +775,7 @@ export class Engine {
     const gross = (exitPx - pos.entryPrice) * pos.closedQty * signed;
     const entryCost = fillCost(pos.leg, pos.side === "long" ? "buy" : "sell", pos.closedQty, pos.entryPrice);
     const pnl = gross - entryCost - pos.exitCost;
-    const friction = estimateEntryFriction(pos.leg, pos.closedQty, pos.entryPrice);
+    const friction = entryCost + pos.exitCost;
     const reason = pos.exitReason ?? "unknown";
     const info = db
       .prepare(
@@ -794,7 +805,7 @@ export class Engine {
     if (pos.leg === "options") this.optionCooldownUntil = clock.now() + 10 * 60_000;
     const stopOrd = pos.stopOrderId ? this.findOrder(pos.stopOrderId) : undefined;
     if (stopOrd) await this.exec.cancel(stopOrd).catch(() => undefined);
-    void this.attribute(pos, reason, Number(info.lastInsertRowid));
+    if (!this.replay) void this.attribute(pos, reason, Number(info.lastInsertRowid));
   }
 
   private async attribute(pos: OpenPosition, reason: string, tradeId: number): Promise<void> {
@@ -1032,6 +1043,10 @@ export class Engine {
       taken: this.taken,
     };
   }
+}
+
+function fmtMin(m: number): string {
+  return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
 }
 
 function reasonFromTag(tag: string): string {

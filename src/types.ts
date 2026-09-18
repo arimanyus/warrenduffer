@@ -184,6 +184,7 @@ export interface WorkingOrder {
   stop: number | null;
   target: number | null;
   stopBps: number | null;
+  tif?: "MKT" | "LMT";
 }
 
 export interface GovernorState {

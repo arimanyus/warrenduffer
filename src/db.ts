@@ -422,7 +422,16 @@ export function latencyP90(): number {
 
 export function tokensToday(): number {
   const start = clock.now() - 20 * 3600_000;
-  const row = db.prepare("SELECT COALESCE(SUM(tokens),0) AS t FROM decisions WHERE ts > ? AND stage NOT LIKE 'cal:%'").get(start) as { t: number };
+  // One evaluate() used to write the same token count on every question row.
+  const row = db
+    .prepare(
+      `SELECT COALESCE(SUM(t),0) AS t FROM (
+         SELECT MAX(tokens) AS t FROM decisions
+         WHERE ts > ? AND stage NOT LIKE 'cal:%'
+         GROUP BY ts, stage, IFNULL(symbol, '')
+       )`,
+    )
+    .get(start) as { t: number };
   return row.t;
 }
 

@@ -41,9 +41,11 @@ async function main(): Promise<void> {
   const { startServer } = await import("../src/server.js");
   const { INDEX_TOKEN, NIFTY50 } = await import("../src/kotak/scrip.js");
   const { addDays } = await import("../src/time.js");
+  const { barTs } = await import("../src/data/bars.js");
   type Bar = import("../src/types.js").Bar;
 
   db.exec("DELETE FROM snapshots; DELETE FROM decisions; DELETE FROM rankings; DELETE FROM orders; DELETE FROM fills; DELETE FROM trades; DELETE FROM positions; DELETE FROM governor_log; DELETE FROM events;");
+  db.pragma("wal_checkpoint(TRUNCATE)");
 
   // 1. Bars: always refresh from the live DB (today's replay must see the latest bars), else fetch from Kotak.
   let dayCount = 0;
@@ -83,54 +85,89 @@ async function main(): Promise<void> {
     }
   }
 
-  // 2. Day bars per symbol, in order.
+  // 2. Day bars per symbol, one row per minute. Mixed live/candle timestamps get folded together.
   const rows = db.prepare("SELECT symbol, ts, open, high, low, close, volume FROM bars_1m WHERE ts >= ? AND ts < ? ORDER BY symbol, ts").all(dayStart, dayEnd) as Bar[];
   const bySym = new Map<string, Bar[]>();
   for (const r of rows) {
+    const ts = barTs(r.ts);
     const arr = bySym.get(r.symbol) ?? [];
-    arr.push(r);
-    bySym.set(r.symbol, arr);
+    const last = arr.at(-1);
+    if (last && last.ts === ts) {
+      last.high = Math.max(last.high, r.high);
+      last.low = Math.min(last.low, r.low);
+      last.close = r.close;
+      last.volume += r.volume;
+    } else {
+      arr.push({ ...r, ts });
+      bySym.set(r.symbol, arr);
+    }
   }
   if (!bySym.size) {
     console.error(`still no bars for ${date}`);
     process.exit(1);
   }
-  const minutes = [...new Set(rows.map((r) => r.ts))].sort((a, b) => a - b);
+  const minutes = [...new Set([...bySym.values()].flatMap((a) => a.map((b) => b.ts)))].sort((a, b) => a - b);
   console.log(`${bySym.size} symbols, ${minutes.length} minutes on ${date}`);
 
-  // 3. Virtual clock, sim broker/executor, real engine.
+  // 3. Virtual clock, sim broker/executor, real engine. A backward seek rebuilds all of this from 09:15.
   const vclock = useVirtualClock(minutes[0]);
-  const broker = new SimBroker(bySym);
-  const exec = new SimExecutor();
-  const engine = new Engine(broker, { exec, replay: true });
   const ctl = new ReplayControl(date, speed);
   ctl.total = minutes.length;
-  startServer(engine, ctl, port);
-  await engine.start();
+  const CLEAR = "DELETE FROM snapshots; DELETE FROM decisions; DELETE FROM rankings; DELETE FROM orders; DELETE FROM fills; DELETE FROM trades; DELETE FROM positions; DELETE FROM governor_log; DELETE FROM events;";
+  let engine!: InstanceType<typeof Engine>;
+  const boot = async () => {
+    db.exec(CLEAR);
+    vclock.set(minutes[0]);
+    const e = new Engine(new SimBroker(bySym), { exec: new SimExecutor(), replay: true });
+    await e.start();
+    engine = e;
+  };
+  startServer(() => engine, ctl, port);
+  await boot();
 
-  // 4. Step one bar at a time. Each step: clock -> bar close, fast loop (fills, stops), then Jev decision.
-  for (let i = 0; i < minutes.length; i++) {
-    while (ctl.paused && ctl.seekTo === null) await sleep(100);
-    if (ctl.seekTo !== null && i < ctl.seekTo) {
-      vclock.set(minutes[i] + 59_000);
-      ctl.idx = i;
-      ctl.virtualNow = minutes[i] + 59_000;
-      await engine.tick(false);
-      continue;
-    }
-    ctl.seekTo = null;
+  // Each step: clock -> bar close, fast loop (fills, stops), then Jev. Seeking runs fills/stops only.
+  const step = async (i: number, seeking: boolean) => {
+    const stepAt = Date.now();
     const t = minutes[i] + 59_000;
     vclock.set(t);
     ctl.idx = i;
     ctl.virtualNow = t;
-    await engine.tick(true);
-    const d = ctl.delayMs();
-    if (d > 0) await sleep(d);
+    engine.seeking = seeking;
+    await engine.tick(!seeking);
+    engine.seeking = false;
+    if (seeking) return;
+    ctl.lastStepMs = Date.now() - stepAt;
+    await ctl.pace(stepAt);
+  };
+
+  // 4. Play the day. Seek ahead skips; seek behind (or after the end) rebuilds and skips.
+  let i = 0;
+  for (;;) {
+    await ctl.waitWhilePaused();
+    const target = ctl.seekTo;
+    if (target !== null && (target < i || ctl.done)) {
+      ctl.done = false;
+      i = 0;
+      await boot();
+      continue;
+    }
+    if (target !== null && i < target) {
+      await step(i++, true);
+      continue;
+    }
+    ctl.seekTo = null;
+    if (ctl.done) {
+      await ctl.waitForSeek();
+      continue;
+    }
+    await step(i++, false);
+    if (i >= minutes.length) {
+      vclock.set(minutes[minutes.length - 1] + 60_000 * 5);
+      await engine.tick(false);
+      ctl.done = true;
+      console.log("replay done; seek the bar to run it again. Ctrl+C to exit.");
+    }
   }
-  vclock.set(minutes[minutes.length - 1] + 60_000 * 5);
-  await engine.tick(false);
-  ctl.done = true;
-  console.log("replay done; dashboard stays up for review. Ctrl+C to exit.");
 }
 
 function parseArgs(argv: string[]): Record<string, string> {
@@ -144,10 +181,6 @@ function parseArgs(argv: string[]): Record<string, string> {
     }
   }
   return out;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
 }
 
 void main().catch((e) => {

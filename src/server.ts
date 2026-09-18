@@ -30,10 +30,13 @@ const clients = new Set<ServerResponse>();
 let replayCtl: ReplayControl | null = null;
 let manager: ReplayManager | null = null;
 
-export function startServer(engine: Engine, replay?: ReplayControl, port = cfg.port): void {
+/** Replay passes a getter because a backward seek rebuilds its Engine. */
+export function startServer(target: Engine | (() => Engine), replay?: ReplayControl, port = cfg.port): void {
+  const current = typeof target === "function" ? target : () => target;
   replayCtl = replay ?? null;
   manager = replay ? null : new ReplayManager();
   const server = createServer((req, res) => {
+    const engine = current();
     const url = new URL(req.url ?? "/", `http://${cfg.host}:${port}`);
     if (url.pathname === "/api/state") return json(res, state(engine));
     if (url.pathname === "/api/sessions" && manager) {
@@ -120,7 +123,7 @@ export function startServer(engine: Engine, replay?: ReplayControl, port = cfg.p
   server.listen(port, cfg.host, () => {
     console.log(`Warren Duffer${replay ? ` REPLAY ${replay.date}` : ""} http://${cfg.host}:${port}`);
   });
-  setInterval(() => broadcast(engine), replay ? 500 : 2000);
+  setInterval(() => broadcast(current()), replay ? 500 : 2000);
 }
 
 function state(engine: Engine) {

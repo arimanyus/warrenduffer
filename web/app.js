@@ -41,10 +41,25 @@ function renderReplay(r) {
   $("rpDate").textContent = r.date;
   $("rpClock").textContent = ist(r.virtualNow, true) + (r.done ? " · DONE" : "");
   $("rpPlay").textContent = r.done ? "DONE" : r.paused ? "PLAY" : "PAUSE";
-  $("rpSpeeds").innerHTML = SPEEDS.map(([v, l]) => `<button data-speed="${v}" class="${r.speed === v ? "on" : ""}">${l}</button>`).join("");
+  if (!$("rpSpeeds").dataset.ready) {
+    $("rpSpeeds").innerHTML = SPEEDS.map(([v, l]) => `<button data-speed="${v}">${l}</button>`).join("");
+    $("rpSpeeds").dataset.ready = "1";
+  }
+  for (const b of $("rpSpeeds").querySelectorAll("button[data-speed]")) {
+    b.classList.toggle("on", Number(b.dataset.speed) === r.speed);
+  }
   $("rpProg").querySelector("i").style.width = `${r.total ? (100 * r.idx) / r.total : 0}%`;
-  $("rpPct").textContent = `${r.idx}/${r.total}`;
+  const budget = r.speed > 0 ? 60000 / r.speed : 0;
+  const limited = !r.done && !r.paused && r.speed > 0 && (r.lastStepMs || 0) > budget + 40;
+  const note = r.seeking ? " · seeking…" : r.paused ? " · paused" : r.done ? " · click bar to run again" : limited ? " · jev-limited" : "";
+  $("rpPct").textContent = `${r.idx}/${r.total}${note}`;
 }
+
+// Bar index -> IST clock. Bars start at 09:15.
+const barTime = (i) => {
+  const m = 9 * 60 + 15 + i;
+  return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+};
 
 function replayCmd(body) {
   fetch("/api/replay", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -54,11 +69,13 @@ $("rpSpeeds").onclick = (e) => {
   const b = e.target.closest("button[data-speed]");
   if (b) replayCmd({ speed: Number(b.dataset.speed) });
 };
-$("rpProg").onclick = (e) => {
+const barAt = (e) => {
   const rect = e.currentTarget.getBoundingClientRect();
-  const frac = (e.clientX - rect.left) / rect.width;
-  replayCmd({ seek: Math.floor(frac * replayTotal) });
+  const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  return Math.floor(frac * replayTotal);
 };
+$("rpProg").onclick = (e) => replayCmd({ seek: barAt(e) });
+$("rpProg").onmousemove = (e) => (e.currentTarget.title = `seek to ${barTime(barAt(e))} · back rebuilds the day`);
 
 function render(s) {
   renderReplay(s.replay);
@@ -92,11 +109,13 @@ function render(s) {
   const st = s.stats || {};
   const usedPct = s.capital ? Math.min(100, (100 * (s.usedNotional || 0)) / s.capital) : 0;
   const mark = (st.netPnl || 0) + (s.openUnrealized || 0);
+  // Replay is its own simulated book: label it so it is never read as real money.
+  const sim = replay ? "SIM " : "";
   $("nums").innerHTML = [
-    card("TODAY PNL", signed(s.todayPnl), cls(s.todayPnl)),
-    card("OPEN uPNL", signed(s.openUnrealized), cls(s.openUnrealized)),
-    card("ALL-TIME", signed(st.netPnl), cls(st.netPnl)),
-    card("MARK", signed(mark), cls(mark)),
+    card(replay ? "SIM DAY PNL" : "TODAY PNL", signed(s.todayPnl), cls(s.todayPnl)),
+    card(`${sim}OPEN uPNL`, signed(s.openUnrealized), cls(s.openUnrealized)),
+    card(replay ? "SIM TOTAL" : "ALL-TIME", signed(st.netPnl), cls(st.netPnl)),
+    card(`${sim}MARK`, signed(mark), cls(mark)),
     card("CAPITAL", n(s.capital)),
     card("IN USE", `${n(s.usedNotional)}<small>${n(usedPct)}%</small>`),
     card("FREE", n(s.freeCapital)),
@@ -160,6 +179,7 @@ function render(s) {
     .map(
       (t) =>
         `<tr><td class="dim">${ist(t.closed_at)}</td><td>${t.leg}</td><td class="bright">${t.symbol}</td><td class="${t.side === "long" ? "g" : "r"}">${t.side}</td><td>${t.qty}</td>` +
+        `<td>${n(t.entry, 2)}</td><td>${n(t.exit, 2)}</td>` +
         `<td class="${cls(t.pnl)}">${signed(t.pnl)}</td><td>${hold(t.hold_s)}</td><td>${t.exit_reason}</td><td class="dim">${t.attribution || ""}</td></tr>`,
     )
     .join("");

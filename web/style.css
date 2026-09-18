@@ -153,7 +153,8 @@ input[type=number]:focus { outline: none; border-color: var(--g); box-shadow: va
 .replay .speeds { display: flex; gap: 4px; }
 .replay .speeds button { padding: 2px 8px; color: var(--dim); }
 .replay .speeds button.on { color: var(--a); border-color: var(--a); }
-.replay .prog { flex: 1; height: 8px; background: #0d1a10; border: 1px solid var(--bd); cursor: pointer; position: relative; }
+.replay .prog { flex: 1; height: 14px; background: #0d1a10; border: 1px solid var(--bd); cursor: pointer; position: relative; }
+.replay .prog:hover { border-color: var(--a); }
 .replay .prog i { display: block; height: 100%; background: var(--a); box-shadow: 0 0 6px rgba(255, 194, 71, 0.5); width: 0; }
 
 .strip {

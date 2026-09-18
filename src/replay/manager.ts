@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { cfg } from "../config.js";
-import { db } from "../db.js";
+import { db, getCapital } from "../db.js";
 
 export interface SessionRow {
   date: string;
@@ -66,7 +66,11 @@ export class ReplayManager {
     const proc = spawn(
       process.execPath,
       [tsx, "scripts/replay.ts", "--date", date, "--speed", String(speed), "--port", String(port), "--source", cfg.dbPath],
-      { cwd: process.cwd(), env: { ...process.env, REPLAY_WILD: wild ? "1" : "0" }, stdio: ["ignore", "pipe", "pipe"] },
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, REPLAY_WILD: wild ? "1" : "0", CAPITAL: String(getCapital()) },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
     );
     const info: RunningReplay = { date, port, speed, wild, startedAt: Date.now(), ready: false, exited: false, exitCode: null, lastLog: "starting" };
     const onData = (buf: Buffer) => {

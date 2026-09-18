@@ -83,6 +83,7 @@ export class LiveExecutor implements Executor {
       stop: intent.stop ?? null,
       target: intent.target ?? null,
       stopBps: intent.stopBps ?? null,
+      tif: intent.tif ?? "LMT",
     };
     tradingSymbols.set(order.id, intent.tradingSymbol);
     this.orders.set(order.id, order);

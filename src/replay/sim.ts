@@ -1,5 +1,6 @@
 import type { Broker } from "../broker.js";
 import { risk } from "../config.js";
+import { barTs } from "../data/bars.js";
 import { db, insertEvent } from "../db.js";
 import type { Executor, Fill, PlaceIntent } from "../executor/types.js";
 import type { BrokerOrder, BrokerPosition, MarginCheck, PlaceResult, Session } from "../kotak/client.js";
@@ -40,7 +41,7 @@ export class SimBroker implements Broker {
     return [...this.instruments.values()].filter((i) => i.symbol !== INDEX_TOKEN && this.bars.has(i.symbol));
   }
 
-  /** Latest completed bar at or before the clock, as a quote with bar OHLC and cumulative day volume. */
+  /** Latest completed bar at or before the clock, as a quote with that bar's real OHLC. */
   async quotes(tokens: { token: string; segment: string }[]): Promise<Quote[]> {
     this.lastOk = Date.now();
     const now = clock.now();
@@ -55,16 +56,16 @@ export class SimBroker implements Broker {
       const b = series[i];
       let cum = 0;
       for (let k = 0; k <= i; k++) cum += series[k].volume;
-      const tick = 0.05;
+      const tick = this.instruments.get(t.token)?.tickSize || 0.05;
       out.push({
         symbol: t.token,
         token: t.token,
         segment: "nse_cm",
-        ts: now,
+        ts: b.ts,
         ltp: b.close,
         ltq: 0,
         volume: cum,
-        bid: b.close - tick / 2 > 0 ? round2(b.close - tick) : b.close,
+        bid: round2(Math.max(tick, b.close - tick)),
         ask: round2(b.close + tick),
         tbq: 0,
         tsq: 0,
@@ -111,9 +112,9 @@ export class SimBroker implements Broker {
 }
 
 /**
- * Bar-based fills, pessimistic. Orders placed at bar t's close are judged against bar t+1:
- * passive limit fills only if the bar trades through it; stops fill at the worse of trigger and close;
- * exits at touch fill at the worse of the touch and the close.
+ * Bar-based fills. Orders placed on bar t are judged on a later bar only.
+ * Limits fill at the limit if the bar trades through, or at the open if it gaps through.
+ * Stops fill at the trigger, or at the open on a gap. Prices never leave the bar's [low, high].
  */
 export class SimExecutor implements Executor {
   name = "sim";
@@ -172,6 +173,7 @@ export class SimExecutor implements Executor {
       stop: intent.stop ?? null,
       target: intent.target ?? null,
       stopBps: intent.stopBps ?? null,
+      tif: intent.tif ?? "LMT",
     };
     this.orders.set(order.id, order);
     insertEvent("order", `${intent.kind} ${intent.side} ${intent.qty} ${intent.symbol} @${intent.price}${intent.trigger ? ` trg ${intent.trigger}` : ""} ${brokerId}`);
@@ -202,23 +204,13 @@ export class SimExecutor implements Executor {
     for (const order of [...this.orders.values()]) {
       const q = quotes.get(order.symbol);
       if (!q) continue;
-      // Only judge an order against a bar that closed after it was placed.
-      if (q.ts <= order.placedAt) continue;
+      const qBar = barTs(q.ts);
+      if (qBar <= barTs(order.placedAt)) continue;
       const barKey = `${order.id}`;
-      if (this.lastBarTs.get(barKey) === q.ts) continue;
-      this.lastBarTs.set(barKey, q.ts);
-      const tick = q.tickSize || 0.05;
-      let px: number | null = null;
-      if (order.kind === "stop" && order.trigger !== null) {
-        if (order.side === "sell" && q.low <= order.trigger) px = Math.max(order.price, Math.min(order.trigger, q.close)) - tick;
-        if (order.side === "buy" && q.high >= order.trigger) px = Math.min(order.price, Math.max(order.trigger, q.close)) + tick;
-      } else if (order.kind === "exit") {
-        px = order.side === "sell" ? Math.min(order.price, q.close) - tick : Math.max(order.price, q.close) + tick;
-      } else if (order.side === "buy" ? q.low < order.price : q.high > order.price) {
-        px = order.price;
-      }
+      if (this.lastBarTs.get(barKey) === qBar) continue;
+      this.lastBarTs.set(barKey, qBar);
+      const px = fillAgainstBar(order, q);
       if (px !== null && px > 0) {
-        px = round2(px);
         const cost = fillCost(order.leg, order.side, order.qty, px);
         order.filledQty = order.qty;
         order.status = "filled";
@@ -240,6 +232,40 @@ export class SimExecutor implements Executor {
       if (order.kind === "entry" && clock.now() - order.placedAt > risk.entryCancelMs) await this.cancel(order);
     }
   }
+}
+
+/** Next-bar fill that cannot print outside the bar. Exported for checks. */
+export function fillAgainstBar(order: WorkingOrder, q: Quote): number | null {
+  const open = q.open || q.ltp;
+  const high = q.high || Math.max(open, q.close || q.ltp);
+  const low = q.low || Math.min(open, q.close || q.ltp);
+  const market = order.tif === "MKT" || isForcedExit(order);
+  let raw: number | null = null;
+
+  if (order.kind === "stop" && order.trigger !== null) {
+    if (order.side === "sell") {
+      if (low > order.trigger) return null;
+      raw = open <= order.trigger ? open : order.trigger;
+    } else {
+      if (high < order.trigger) return null;
+      raw = open >= order.trigger ? open : order.trigger;
+    }
+  } else if (market) {
+    raw = open;
+  } else if (order.side === "buy") {
+    if (low > order.price) return null;
+    raw = open <= order.price ? open : order.price;
+  } else {
+    if (high < order.price) return null;
+    raw = open >= order.price ? open : order.price;
+  }
+
+  if (raw === null) return null;
+  return round2(Math.min(high, Math.max(low, raw)));
+}
+
+function isForcedExit(order: WorkingOrder): boolean {
+  return order.kind === "exit" && /-(flatten|halt|kill)$/.test(order.tag);
 }
 
 function round2(x: number): number {
