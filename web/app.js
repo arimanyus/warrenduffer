@@ -68,6 +68,8 @@ function render(s) {
   $("mode").className = `pill ${replay || observe ? "a" : "r"}`;
   $("wild").classList.toggle("on", !!s.wild);
   $("wild").textContent = s.wild ? "WILD ON" : "WILD";
+  $("jev").classList.toggle("on", !!s.jevPaused);
+  $("jev").textContent = s.jevPaused ? "JEV PAUSED" : "PAUSE JEV";
   $("model").textContent = s.model;
   $("model").className = `pill ${s.model === "jev" ? "g" : "a"}`;
   $("session").textContent = replay ? "sim broker" : s.session ? "kotak ok" : "no session";
@@ -228,6 +230,10 @@ function drawCurve(pts) {
 $("kill").onclick = () => {
   if (prompt("type CONFIRM to cancel all entries and flatten") !== "CONFIRM") return;
   fetch("/api/kill", { method: "POST" });
+};
+$("jev").onclick = () => {
+  const paused = !$("jev").classList.contains("on");
+  fetch("/api/jev", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paused }) });
 };
 $("wild").onclick = () => {
   const on = !$("wild").classList.contains("on");

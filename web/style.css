@@ -123,6 +123,7 @@ button:hover { background: rgba(57, 255, 122, 0.08); border-color: var(--g); }
 button.kill { color: var(--r); border-color: var(--r); font-weight: 500; }
 button.kill:hover { background: rgba(255, 92, 92, 0.12); }
 button.ghost { color: var(--dim); }
+button#jev.on { color: var(--a); border-color: var(--a); background: rgba(255, 194, 71, 0.12); }
 button#wild { color: var(--dim); letter-spacing: 0.14em; }
 button#wild.on { color: var(--a); border-color: var(--a); background: rgba(255, 194, 71, 0.12); text-shadow: 0 0 6px rgba(255, 194, 71, 0.6); }
 

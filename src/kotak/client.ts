@@ -299,8 +299,8 @@ export class KotakClient {
       trdSym: args.tradingSymbol,
       trnsTp: args.side === "buy" ? "B" : "S",
       qty: String(args.qty),
-      prc: String(args.price),
-      prcTp: args.orderType ?? "L",
+      prc: px(args.price),
+      prcTp: kotakOrderType(args.orderType),
       prod: args.product ?? "MIS",
       trgPrc: "0",
     };
@@ -342,11 +342,11 @@ export class KotakClient {
       mp: "0",
       pc: args.product ?? "MIS",
       pf: "N",
-      pr: String(args.price),
-      pt: args.orderType ?? "L",
+      pr: px(args.price),
+      pt: kotakOrderType(args.orderType),
       qt: String(args.qty),
       rt: "DAY",
-      tp: String(args.trigger ?? 0),
+      tp: px(args.trigger ?? 0),
       ts: args.tradingSymbol,
       tt: args.side === "buy" ? "B" : "S",
       ig: args.tag,
@@ -382,9 +382,9 @@ export class KotakClient {
       ts: args.tradingSymbol,
       tt: args.side === "buy" ? "B" : "S",
       qt: String(args.qty),
-      pr: String(args.price),
-      tp: String(args.trigger ?? 0),
-      pt: args.orderType ?? "L",
+      pr: px(args.price),
+      tp: px(args.trigger ?? 0),
+      pt: kotakOrderType(args.orderType),
       pc: args.product ?? "MIS",
       vd: args.validity ?? "DAY",
       dq: "0",
@@ -608,6 +608,18 @@ function chunks<T>(arr: T[], n: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
   return out;
+}
+
+/** Kotak order-type codes (verified via check-margin): L, MKT, SL (= stop-loss limit), SL-M. "SL-L" is rejected with stCode 1020. */
+function kotakOrderType(t?: string): string {
+  if (!t || t === "L") return "L";
+  if (t === "SL-L" || t === "SL") return "SL";
+  return t;
+}
+
+/** Prices go to Kotak as 2-decimal strings; never "715.9000000000001". */
+function px(n: number): string {
+  return (Math.round(n * 100) / 100).toFixed(2);
 }
 
 function form(fields: Record<string, string>): string {

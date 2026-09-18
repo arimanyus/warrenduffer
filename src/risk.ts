@@ -34,9 +34,10 @@ export function targetPrice(side: PositionSide, entry: number, stopBpsV: number,
   return stopPrice(side === "long" ? "short" : "long", entry, stopBpsV * risk.targetMult, tick);
 }
 
+/** Snap to tick and strip float residue (715.9000000000001 would be rejected by Kotak). */
 export function roundTick(price: number, tick: number): number {
-  if (!tick) return price;
-  return Math.round(price / tick) * tick;
+  if (!tick) return Math.round(price * 100) / 100;
+  return Math.round(Math.round(price / tick) * tick * 100) / 100;
 }
 
 export function canEnterMore(openCount: number): { ok: boolean; reason: string } {

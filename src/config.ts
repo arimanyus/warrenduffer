@@ -29,6 +29,7 @@ export interface RiskConfig {
   stage1MinProb: number;
   wildMinProb: number;
   wildTierA: number;
+  wildMaxSpreadBps: number;
   riskOffHalt: number;
   exitNow: number;
   takeProfit: number;

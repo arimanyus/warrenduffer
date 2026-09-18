@@ -49,6 +49,7 @@ export class Engine {
   warmedUp = false;
   lastPositionCheck = 0;
   wild = getWild();
+  jevPaused = false;
   sessionId: number | null = null;
   lastSessionRefresh = 0;
   lastIndex: IndexFeatures | null = null;
@@ -171,6 +172,8 @@ export class Engine {
     } finally {
       this.fastBusy = false;
     }
+    // Jev paused: no entry scans, no Jev exits. Stops, fills, flatten and kill keep running in the fast loop.
+    if (this.jevPaused) return;
     // Hold / sell / breakeven on open positions: its own faster cadence, independent of entry scans.
     const posMs = cfg.positionIntervalS * 1000;
     if (!this.managing && this.positions.size && clock.now() - this.lastPositionCheck >= posMs) {
@@ -221,8 +224,9 @@ export class Engine {
       // At a 5 s cadence one noisy answer must not close a trade: two consecutive exit votes (~10 s) are required.
       // Time stops and hard stops bypass this; they are not Jev opinions.
       pos.exitVotes = wantsOut ? pos.exitVotes + 1 : 0;
-      const confirmed = wantsOut && (pos.exitVotes >= cfg.exitConfirmVotes || d.reason === "time");
-      pos.lastVerdict = `${d.action}${wantsOut && !confirmed ? ` (${pos.exitVotes}/${cfg.exitConfirmVotes})` : ""} · thesis ${d.thesis.toFixed(1)} · exit ${d.exitNow.toFixed(2)} · tp ${d.takeProfit.toFixed(2)}`;
+      const votesNeeded = this.wild ? 1 : cfg.exitConfirmVotes;
+      const confirmed = wantsOut && (pos.exitVotes >= votesNeeded || d.reason === "time");
+      pos.lastVerdict = `${d.action}${wantsOut && !confirmed ? ` (${pos.exitVotes}/${votesNeeded})` : ""} · thesis ${d.thesis.toFixed(1)} · exit ${d.exitNow.toFixed(2)} · tp ${d.takeProfit.toFixed(2)}`;
       if (confirmed) {
         await this.exitPosition(pos, d.reason);
       } else if (d.action === "breakeven") {
@@ -332,11 +336,12 @@ export class Engine {
     for (const r of [...s1.longs, ...s1.shorts]) {
       const f = featMap.get(r.symbol);
       if (!f) continue;
-      if (f.spreadBps > risk.maxSpreadBps) {
+      // WILD keeps only a wide spread sanity cap; RVOL and the tight spread gate are two-stage-mode filters.
+      if (f.spreadBps > (this.wild ? risk.wildMaxSpreadBps : risk.maxSpreadBps)) {
         filtered.push(`${r.symbol} spread ${f.spreadBps.toFixed(1)}bps`);
         continue;
       }
-      if (f.volume.rvol20d < risk.minRvol) {
+      if (!this.wild && f.volume.rvol20d < risk.minRvol) {
         filtered.push(`${r.symbol} rvol ${f.volume.rvol20d.toFixed(2)}`);
         continue;
       }
@@ -430,7 +435,8 @@ export class Engine {
     }
     const g = computeGovernor();
     const ga = governorAllows(g);
-    if (!ga.ok) {
+    // WILD ignores the pace governor; the daily loss halt, capital box and position cap still apply.
+    if (!ga.ok && !this.wild) {
       this.lastSkipReason = `governor ${ga.reason}`;
       return;
     }
@@ -440,7 +446,8 @@ export class Engine {
       return;
     }
     const side = c.side === "long" ? "buy" : "sell";
-    const px = side === "buy" ? f.bid : f.ask;
+    // WILD scalps: cross the spread so the entry fills now. Two-stage rests on the touch and re-quotes.
+    const px = this.wild ? (side === "buy" ? f.ask : f.bid) : side === "buy" ? f.bid : f.ask;
     const stop = stopPrice(c.side, px, sb, f.tickSize);
     const target = targetPrice(c.side, px, sb, f.tickSize);
     try {
@@ -855,6 +862,12 @@ export class Engine {
     this.sessionId = null;
   }
 
+  setJevPaused(on: boolean): void {
+    this.jevPaused = on;
+    this.lastSkipReason = on ? "jev paused" : "";
+    insertEvent("mode", on ? "Jev paused: no new decisions; stops and flatten still active" : "Jev resumed");
+  }
+
   setWildMode(on: boolean): void {
     this.wild = on;
     setWild(on);
@@ -982,6 +995,7 @@ export class Engine {
       lastSkipReason: this.lastSkipReason,
       sessionId: this.sessionId,
       wild: this.wild,
+      jevPaused: this.jevPaused,
       universeSize: this.universe.length,
       quotesLive: this.quotes.size,
       capital,

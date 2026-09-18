@@ -85,6 +85,14 @@ export function startServer(engine: Engine, replay?: ReplayControl, port = cfg.p
       engine.unkill();
       return json(res, { ok: true });
     }
+    if (url.pathname === "/api/jev" && req.method === "POST") {
+      void readBody(req).then((raw) => {
+        const body = JSON.parse(raw || "{}") as { paused?: boolean };
+        engine.setJevPaused(!!body.paused);
+        json(res, { ok: true, jevPaused: engine.jevPaused });
+      });
+      return;
+    }
     if (url.pathname === "/api/wild" && req.method === "POST") {
       void readBody(req).then((raw) => {
         const body = JSON.parse(raw || "{}") as { on?: boolean };
