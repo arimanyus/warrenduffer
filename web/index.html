@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Warren Duffer</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0d1117; --card:#161b22; --bd:#30363d; --tx:#e6edf3; --mut:#8b949e; --g:#3fb950; --r:#f85149; --a:#d29922; }
+    * { box-sizing: border-box; }
+    body { margin:0; font: 13px/1.45 "Segoe UI", system-ui, sans-serif; background:var(--bg); color:var(--tx); }
+    header { display:flex; gap:12px; align-items:center; padding:10px 14px; border-bottom:1px solid var(--bd); flex-wrap:wrap; }
+    .pill { border:1px solid var(--bd); background:var(--card); padding:2px 8px; border-radius:999px; }
+    .g { color:var(--g); } .r { color:var(--r); } .a { color:var(--a); } .mut { color:var(--mut); }
+    button { background:#21262d; color:var(--tx); border:1px solid var(--bd); padding:4px 10px; cursor:pointer; }
+    button.kill { border-color:var(--r); color:var(--r); }
+    main { display:grid; grid-template-columns: 1fr 1fr; gap:12px; padding:12px; }
+    section { background:var(--card); border:1px solid var(--bd); padding:10px; overflow:auto; max-height:42vh; }
+    h2 { margin:0 0 8px; font-size:12px; text-transform:uppercase; color:var(--mut); }
+    table { width:100%; border-collapse:collapse; }
+    th, td { text-align:left; padding:3px 4px; border-bottom:1px solid #21262d; font-variant-numeric:tabular-nums; }
+    .bar { height:8px; background:#21262d; display:flex; }
+    .bar i { display:block; height:100%; }
+    .bar .l { background:var(--g); } .bar .s { background:var(--r); }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Warren Duffer</strong>
+    <span id="mode" class="pill"></span>
+    <span id="model" class="pill"></span>
+    <span id="session" class="pill"></span>
+    <span id="lat" class="pill mut"></span>
+    <span id="skip" class="pill mut"></span>
+    <button class="kill" id="kill">KILL</button>
+  </header>
+  <div id="regime" style="padding:6px 14px;border-bottom:1px solid var(--bd)"></div>
+  <main>
+    <section>
+      <h2>Today</h2>
+      <div id="today"></div>
+      <div id="positions"></div>
+    </section>
+    <section>
+      <h2>Ranking</h2>
+      <div id="rank"></div>
+    </section>
+    <section>
+      <h2>Trades</h2>
+      <table id="trades"><thead><tr><th>t</th><th>leg</th><th>sym</th><th>side</th><th>pnl</th><th>why</th><th>setup</th></tr></thead><tbody></tbody></table>
+    </section>
+    <section>
+      <h2>Decisions</h2>
+      <table id="decs"><thead><tr><th>stage</th><th>sym</th><th>q</th><th>a</th><th>p</th><th>ms</th></tr></thead><tbody></tbody></table>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

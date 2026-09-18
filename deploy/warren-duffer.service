@@ -1,0 +1,14 @@
+[Unit]
+Description=Warren Duffer
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/warren-duffer
+ExecStart=/usr/bin/pnpm start
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

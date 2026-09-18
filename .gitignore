@@ -1,0 +1,8 @@
+node_modules/
+dist/
+data/
+.env
+*.db
+*.db-journal
+kill.switch
+.DS_Store

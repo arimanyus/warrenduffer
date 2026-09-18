@@ -1,0 +1,575 @@
+import { authenticator } from "otplib";
+import { cfg } from "../config.js";
+import type { Instrument, OptionContract, Quote, Side } from "../types.js";
+import { RateLimiter } from "./limiter.js";
+import { INDEX_TOKEN, parseScripCsv } from "./scrip.js";
+
+const LOGIN = "https://mis.kotaksecurities.com/login/1.0/tradeApiLogin";
+const VALIDATE = "https://mis.kotaksecurities.com/login/1.0/tradeApiValidate";
+const FIN_KEY = "neotradeapi";
+
+export class KotakError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly body?: unknown,
+  ) {
+    super(message);
+  }
+}
+
+export interface Session {
+  baseUrl: string;
+  auth: string;
+  sid: string;
+}
+
+export interface PlaceResult {
+  orderId: string | null;
+  raw: unknown;
+}
+
+export interface BrokerOrder {
+  orderId: string;
+  symbol: string;
+  status: string;
+  qty: number;
+  filledQty: number;
+  price: number;
+  trigger: number;
+  side: Side;
+  product: string;
+  tag: string;
+}
+
+export interface BrokerPosition {
+  symbol: string;
+  token: string;
+  segment: string;
+  qty: number;
+  avgPrice: number;
+  product: string;
+}
+
+export interface MarginCheck {
+  available: number;
+  required: number;
+  ok: boolean;
+  raw: unknown;
+}
+
+export class KotakClient {
+  session: Session | null = null;
+  lastOk = Date.now();
+  readonly limiter = new RateLimiter();
+  private scrips = new Map<string, Instrument>();
+  private foScrips: Instrument[] = [];
+  private relogging = false;
+
+  constructor(
+    private onSessionExpired?: () => void,
+    private accessToken = cfg.kotakAccessToken,
+  ) {}
+
+  totp(): string {
+    authenticator.options = { step: 30, digits: 6 };
+    return authenticator.generate(cfg.kotakTotpSecret.replace(/\s+/g, ""));
+  }
+
+  async login(): Promise<Session> {
+    const totp = this.totp();
+    const loginRes = await this.raw("POST", LOGIN, {
+      headers: this.tokenHeaders(),
+      body: JSON.stringify({
+        mobileNumber: cfg.kotakMobile,
+        ucc: cfg.kotakUcc,
+        totp,
+      }),
+    });
+    const viewToken = pick(loginRes, ["data.token", "data.Auth", "token", "Auth", "viewToken"]);
+    const viewSid = pick(loginRes, ["data.sid", "data.Sid", "sid", "Sid", "viewSid"]);
+    if (!viewToken || !viewSid) throw new KotakError("login missing view token/sid", 401, loginRes);
+
+    const valRes = await this.raw("POST", VALIDATE, {
+      headers: {
+        ...this.tokenHeaders(),
+        sid: String(viewSid),
+        Auth: String(viewToken),
+      },
+      body: JSON.stringify({ mpin: cfg.kotakMpin }),
+    });
+    const auth = pick(valRes, ["data.token", "data.Auth", "token", "Auth"]);
+    const sid = pick(valRes, ["data.sid", "data.Sid", "sid", "Sid"]);
+    const baseUrl = String(pick(valRes, ["data.baseUrl", "baseUrl", "data.baseURL"]) ?? "").replace(/\/$/, "");
+    if (!auth || !sid || !baseUrl) throw new KotakError("validate missing session", 401, valRes);
+    this.session = { baseUrl, auth: String(auth), sid: String(sid) };
+    this.lastOk = Date.now();
+    return this.session;
+  }
+
+  async ensureSession(): Promise<Session> {
+    if (this.session) return this.session;
+    return this.login();
+  }
+
+  async reloginOnce(): Promise<boolean> {
+    if (this.relogging) return false;
+    this.relogging = true;
+    try {
+      this.session = null;
+      await this.login();
+      return true;
+    } catch {
+      this.onSessionExpired?.();
+      return false;
+    } finally {
+      this.relogging = false;
+    }
+  }
+
+  async loadScrips(): Promise<void> {
+    const sess = await this.ensureSession();
+    await this.limiter.takeRequest();
+    const res = await this.raw("GET", `${sess.baseUrl}/script-details/1.0/masterscrip/file-paths`, {
+      headers: this.tokenHeaders(),
+    });
+    const paths = (pick(res, ["data.filesPaths", "filesPaths"]) as string[] | undefined) ?? [];
+    this.scrips.clear();
+    this.foScrips = [];
+    for (const url of paths) {
+      const u = url.toLowerCase();
+      const isCm = u.includes("nse_cm");
+      const isFo = u.includes("nse_fo");
+      if (!isCm && !isFo) continue;
+      await this.limiter.takeRequest();
+      const text = await fetch(url).then((r) => r.text());
+      const parsed = parseScripCsv(text, isCm ? "nse_cm" : "nse_fo");
+      if (isCm) for (const i of parsed) this.scrips.set(i.symbol, i);
+      else this.foScrips = parsed;
+    }
+    this.scrips.set(INDEX_TOKEN, {
+      symbol: INDEX_TOKEN,
+      token: INDEX_TOKEN,
+      segment: "nse_cm",
+      tickSize: 0.05,
+      lotSize: 1,
+      tradingSymbol: INDEX_TOKEN,
+      name: "Nifty 50",
+    });
+  }
+
+  getInstrument(symbol: string): Instrument | undefined {
+    return this.scrips.get(symbol);
+  }
+
+  allCash(): Instrument[] {
+    return [...this.scrips.values()].filter((i) => i.segment === "nse_cm" && i.token !== INDEX_TOKEN);
+  }
+
+  foInstruments(): Instrument[] {
+    return this.foScrips;
+  }
+
+  async quotes(tokens: { token: string; segment: string }[]): Promise<Quote[]> {
+    if (!tokens.length) return [];
+    const out: Quote[] = [];
+    for (const chunk of chunks(tokens, 25)) {
+      await this.limiter.takeRequest();
+      const body = {
+        instrument_tokens: chunk.map((t) => ({
+          instrument_token: t.token,
+          exchange_segment: t.segment,
+        })),
+        quote_type: "all",
+      };
+      const sess = this.session;
+      const url = sess
+        ? `${sess.baseUrl}/script-details/1.0/quotes`
+        : "https://mis.kotaksecurities.com/script-details/1.0/quotes";
+      const res = await this.authed("POST", url, {
+        headers: this.tokenHeaders(),
+        body: JSON.stringify(body),
+        order: false,
+      });
+      const list = asArray(pick(res, ["data", "message", "quotes"]) ?? res);
+      for (const row of list) out.push(this.normalizeQuote(row));
+    }
+    return out.filter((q) => q.token);
+  }
+
+  async candles(token: string, segment: string, from: string, to: string, interval = "1min"): Promise<
+    { ts: number; open: number; high: number; low: number; close: number; volume: number }[]
+  > {
+    const sess = await this.ensureSession();
+    await this.limiter.takeRequest();
+    const neo = encodeURIComponent(`${segment}|${token}`);
+    const url = `${sess.baseUrl}/market-data/1.0/historical/details?neosymbol=${neo}&fromdate=${from}&todate=${to}&interval=${interval}`;
+    const res = await this.authed("GET", url, { headers: this.tokenHeaders(), order: false });
+    const rows = (pick(res, ["data.candles", "candles", "data"]) as unknown[]) ?? [];
+    return (Array.isArray(rows) ? rows : []).map((r) => {
+      if (Array.isArray(r)) {
+        return {
+          ts: Date.parse(String(r[0])),
+          open: Number(r[1]),
+          high: Number(r[2]),
+          low: Number(r[3]),
+          close: Number(r[4]),
+          volume: Number(r[5] ?? 0),
+        };
+      }
+      const o = r as Record<string, unknown>;
+      return {
+        ts: Date.parse(String(o.time ?? o.timestamp ?? o.datetime)),
+        open: Number(o.open),
+        high: Number(o.high),
+        low: Number(o.low),
+        close: Number(o.close),
+        volume: Number(o.volume ?? o.qty ?? 0),
+      };
+    }).filter((c) => Number.isFinite(c.ts) && Number.isFinite(c.close));
+  }
+
+  async expiries(underlying = "NIFTY"): Promise<string[]> {
+    const sess = await this.ensureSession();
+    await this.limiter.takeRequest();
+    const url = `${sess.baseUrl}/market-data/1.0/watchlist/expiries?underlying=${underlying}&exchange=nse_fo&instrument_type=option`;
+    const res = await this.authed("GET", url, { headers: this.tokenHeaders(), order: false });
+    const list = pick(res, ["data.expiries", "data", "expiries"]) ?? [];
+    if (Array.isArray(list)) return list.map(String);
+    return [];
+  }
+
+  async optionChain(underlying = "NIFTY", expiry?: string): Promise<OptionContract[]> {
+    const sess = await this.ensureSession();
+    await this.limiter.takeRequest();
+    let url = `${sess.baseUrl}/market-data/1.0/watchlist/option-chain?exchange=nse_fo&underlying=${underlying}&instrument_type=option&count=20`;
+    if (expiry) url += `&expiry=${expiry}`;
+    const res = await this.authed("GET", url, { headers: this.tokenHeaders(), order: false });
+    const data = (pick(res, ["data"]) ?? res) as Record<string, unknown>;
+    const calls = asArray(data.ce ?? data.calls ?? data.call);
+    const puts = asArray(data.pe ?? data.puts ?? data.put);
+    const out: OptionContract[] = [];
+    for (const row of [...calls, ...puts]) {
+      const r = row as Record<string, unknown>;
+      const right = String(r.option_type ?? r.right ?? r.instrumentType ?? (calls.includes(row) ? "CE" : "PE")).toUpperCase();
+      out.push({
+        symbol: String(r.trading_symbol ?? r.trdSymbol ?? r.symbol ?? ""),
+        token: String(r.instrument_token ?? r.token ?? r.pSymbol ?? ""),
+        tradingSymbol: String(r.trading_symbol ?? r.trdSymbol ?? r.symbol ?? ""),
+        strike: Number(r.strike ?? r.strike_price ?? 0),
+        right: right.includes("P") ? "PE" : "CE",
+        expiry: String(r.expiry ?? expiry ?? ""),
+        lotSize: Number(r.lot_size ?? r.lotSize ?? 75) || 75,
+        tickSize: Number(r.tick_size ?? 0.05) || 0.05,
+        ltp: Number(r.ltp ?? r.last_traded_price ?? 0),
+        bid: Number(r.bid ?? r.best_bid ?? r.bp ?? 0),
+        ask: Number(r.ask ?? r.best_ask ?? r.sp ?? 0),
+      });
+    }
+    return out.filter((c) => c.token && c.strike);
+  }
+
+  async marginRequired(args: {
+    segment: string;
+    token: string;
+    tradingSymbol: string;
+    side: Side;
+    qty: number;
+    price: number;
+    orderType?: string;
+    product?: string;
+  }): Promise<MarginCheck> {
+    const sess = await this.ensureSession();
+    await this.limiter.takeOrder();
+    const jData = {
+      es: args.segment,
+      tk: args.token,
+      ts: args.tradingSymbol,
+      tt: args.side === "buy" ? "B" : "S",
+      qt: String(args.qty),
+      pr: String(args.price),
+      pt: args.orderType ?? "L",
+      pc: args.product ?? "MIS",
+    };
+    const res = await this.authed("POST", `${sess.baseUrl}/quick/user/check-margin`, {
+      headers: this.sessionFormHeaders(),
+      body: form({ jData: JSON.stringify(jData) }),
+      order: true,
+    });
+    const available = Number(pick(res, ["data.avlCash", "data.avlMrgn", "avlCash"]) ?? 0);
+    const required = Number(pick(res, ["data.ordMrgn", "data.reqdMrgn", "data.totMrgnUsd"]) ?? 0);
+    const rms = String(pick(res, ["data.rmsVldtd", "data.stat"]) ?? "");
+    return { available, required, ok: rms.toUpperCase() === "OK" || available >= required, raw: res };
+  }
+
+  async place(args: {
+    segment: string;
+    tradingSymbol: string;
+    token?: string;
+    side: Side;
+    qty: number;
+    price: number;
+    orderType?: "L" | "SL-L";
+    trigger?: number;
+    product?: string;
+    tag: string;
+  }): Promise<PlaceResult> {
+    const sess = await this.ensureSession();
+    await this.limiter.takeOrder();
+    const jData: Record<string, string> = {
+      am: "NO",
+      dq: "0",
+      es: args.segment,
+      mp: "0",
+      pc: args.product ?? "MIS",
+      pf: "N",
+      pr: String(args.price),
+      pt: args.orderType ?? "L",
+      qt: String(args.qty),
+      rt: "DAY",
+      tp: String(args.trigger ?? 0),
+      ts: args.tradingSymbol,
+      tt: args.side === "buy" ? "B" : "S",
+      ig: args.tag,
+    };
+    if (args.token) jData.tk = args.token;
+    const res = await this.authed("POST", `${sess.baseUrl}/quick/order/rule/ms/place`, {
+      headers: this.sessionFormHeaders(),
+      body: form({ jData: JSON.stringify(jData) }),
+      order: true,
+    });
+    const orderId = pick(res, ["nOrdNo", "data.nOrdNo", "norentm", "data.orderId", "orderId"]);
+    return { orderId: orderId ? String(orderId) : null, raw: res };
+  }
+
+  async modify(args: {
+    orderId: string;
+    qty: number;
+    price: number;
+    trigger?: number;
+    orderType?: "L" | "SL-L";
+    validity?: string;
+  }): Promise<unknown> {
+    const sess = await this.ensureSession();
+    await this.limiter.takeOrder();
+    const jData = {
+      no: args.orderId,
+      qt: String(args.qty),
+      pr: String(args.price),
+      tp: String(args.trigger ?? 0),
+      pt: args.orderType ?? "L",
+      rt: args.validity ?? "DAY",
+      tt: "M",
+    };
+    return this.authed("POST", `${sess.baseUrl}/quick/order/vr/modify`, {
+      headers: this.sessionFormHeaders(),
+      body: form({ jData: JSON.stringify(jData) }),
+      order: true,
+    });
+  }
+
+  async cancel(orderId: string): Promise<unknown> {
+    const sess = await this.ensureSession();
+    await this.limiter.takeOrder();
+    const jData = { no: orderId };
+    return this.authed("POST", `${sess.baseUrl}/quick/order/cancel`, {
+      headers: this.sessionFormHeaders(),
+      body: form({ jData: JSON.stringify(jData) }),
+      order: true,
+    });
+  }
+
+  async orders(): Promise<BrokerOrder[]> {
+    const sess = await this.ensureSession();
+    await this.limiter.takeRequest();
+    const res = await this.authed("GET", `${sess.baseUrl}/quick/user/orders`, {
+      headers: this.sessionHeaders(),
+      order: false,
+    });
+    return asArray(pick(res, ["data", "ord"]) ?? res).map((row) => {
+      const r = row as Record<string, unknown>;
+      return {
+        orderId: String(r.nOrdNo ?? r.norentm ?? r.orderId ?? ""),
+        symbol: String(r.trdSym ?? r.ts ?? r.tradingSymbol ?? ""),
+        status: String(r.ordSt ?? r.status ?? r.st ?? ""),
+        qty: Number(r.qty ?? r.qt ?? 0),
+        filledQty: Number(r.fldQty ?? r.filledQty ?? 0),
+        price: Number(r.prc ?? r.avgPrc ?? r.price ?? 0),
+        trigger: Number(r.trgPrc ?? r.trigger ?? 0),
+        side: (String(r.trnsTp ?? r.tt ?? "").toUpperCase().startsWith("S") ? "sell" : "buy") as Side,
+        product: String(r.prod ?? r.pc ?? "MIS"),
+        tag: String(r.usrId ?? r.ig ?? r.tag ?? ""),
+      };
+    }).filter((o) => o.orderId);
+  }
+
+  async positions(): Promise<BrokerPosition[]> {
+    const sess = await this.ensureSession();
+    await this.limiter.takeRequest();
+    const res = await this.authed("GET", `${sess.baseUrl}/quick/user/positions`, {
+      headers: this.sessionHeaders(),
+      order: false,
+    });
+    return asArray(pick(res, ["data", "pos"]) ?? res).map((row) => {
+      const r = row as Record<string, unknown>;
+      const buy = Number(r.flBuyQty ?? r.buyQty ?? 0);
+      const sell = Number(r.flSellQty ?? r.sellQty ?? 0);
+      return {
+        symbol: String(r.trdSym ?? r.ts ?? r.tradingSymbol ?? ""),
+        token: String(r.tok ?? r.tk ?? r.token ?? ""),
+        segment: String(r.exSeg ?? r.es ?? "nse_cm"),
+        qty: buy - sell || Number(r.netQty ?? r.qty ?? 0),
+        avgPrice: Number(r.avgPrc ?? r.avgPrice ?? 0),
+        product: String(r.prod ?? r.pc ?? "MIS"),
+      };
+    }).filter((p) => p.qty !== 0);
+  }
+
+  async limits(): Promise<{ available: number; raw: unknown }> {
+    const sess = await this.ensureSession();
+    await this.limiter.takeRequest();
+    const res = await this.authed("GET", `${sess.baseUrl}/quick/user/limits`, {
+      headers: this.sessionHeaders(),
+      order: false,
+    });
+    return { available: Number(pick(res, ["data.Net", "data.avlCash", "Net"]) ?? 0), raw: res };
+  }
+
+  private tokenHeaders(): Record<string, string> {
+    return {
+      Authorization: this.accessToken,
+      "neo-fin-key": FIN_KEY,
+      "Content-Type": "application/json",
+    };
+  }
+
+  private sessionHeaders(): Record<string, string> {
+    if (!this.session) throw new KotakError("no session", 401);
+    return {
+      Auth: this.session.auth,
+      sid: this.session.sid,
+      "neo-fin-key": FIN_KEY,
+      "Content-Type": "application/json",
+    };
+  }
+
+  private sessionFormHeaders(): Record<string, string> {
+    return { ...this.sessionHeaders(), "Content-Type": "application/x-www-form-urlencoded" };
+  }
+
+  private async authed(
+    method: string,
+    url: string,
+    init: { headers: Record<string, string>; body?: string; order: boolean },
+  ): Promise<unknown> {
+    try {
+      const res = await this.raw(method, url, init);
+      this.lastOk = Date.now();
+      return res;
+    } catch (e) {
+      if (e instanceof KotakError && e.status === 403) {
+        const ok = await this.reloginOnce();
+        if (ok) return this.raw(method, url, init);
+      }
+      throw e;
+    }
+  }
+
+  private async raw(
+    method: string,
+    url: string,
+    init: { headers: Record<string, string>; body?: string },
+  ): Promise<unknown> {
+    const res = await fetch(url, { method, headers: init.headers, body: init.body });
+    const text = await res.text();
+    let json: unknown = text;
+    try {
+      json = text ? JSON.parse(text) : {};
+    } catch {
+      json = { text };
+    }
+    if (res.status === 403) throw new KotakError("session expired", 403, json);
+    if (!res.ok) throw new KotakError(`kotak ${res.status}`, res.status, json);
+    const code = pick(json, ["stCode", "data.stCode", "stat"]);
+    if (code && Number(code) === 403) throw new KotakError("session expired", 403, json);
+    return json;
+  }
+
+  private normalizeQuote(row: unknown): Quote {
+    const r = row as Record<string, unknown>;
+    const ohlc = (r.ohlc as Record<string, unknown> | undefined) ?? {};
+    const depth = (r.depth as Record<string, unknown> | undefined) ?? {};
+    const bids = levels(depth.buy ?? r.buy ?? r.bids);
+    const asks = levels(depth.sell ?? r.sell ?? r.asks);
+    const bid = Number(r.buy_price ?? r.bp ?? bids[0]?.price ?? 0);
+    const ask = Number(r.sell_price ?? r.sp ?? asks[0]?.price ?? 0);
+    const ltp = Number(r.last_traded_price ?? r.ltp ?? r.lastPrice ?? 0);
+    if (bid && !bids.length) bids.push({ price: bid, qty: Number(r.buy_quantity ?? 0) });
+    if (ask && !asks.length) asks.push({ price: ask, qty: Number(r.sell_quantity ?? 0) });
+    return {
+      symbol: String(r.trading_symbol ?? r.ts ?? r.trdSym ?? "").replace(/-EQ$/i, ""),
+      token: String(r.instrument_token ?? r.tk ?? r.token ?? ""),
+      segment: String(r.exchange_segment ?? r.es ?? "nse_cm"),
+      ts: Date.now(),
+      ltp,
+      ltq: Number(r.last_traded_quantity ?? r.ltq ?? 0),
+      volume: Number(r.volume ?? r.v ?? 0),
+      bid: bid || ltp,
+      ask: ask || ltp,
+      tbq: Number(r.total_buy_quantity ?? r.tbq ?? 0),
+      tsq: Number(r.total_sell_quantity ?? r.tsq ?? 0),
+      bids,
+      asks,
+      open: Number(ohlc.open ?? r.open ?? r.op ?? 0),
+      high: Number(ohlc.high ?? r.high ?? r.h ?? 0),
+      low: Number(ohlc.low ?? r.low ?? r.lo ?? 0),
+      close: Number(ohlc.close ?? r.close ?? r.c ?? ltp),
+      tickSize: Number(r.precision ?? 0.05) || 0.05,
+    };
+  }
+}
+
+function levels(raw: unknown): { price: number; qty: number }[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((x) => {
+      const o = x as Record<string, unknown>;
+      return { price: Number(o.price ?? o.p ?? 0), qty: Number(o.quantity ?? o.qty ?? o.q ?? 0) };
+    })
+    .filter((l) => l.price > 0);
+}
+
+function pick(obj: unknown, paths: string[]): unknown {
+  for (const p of paths) {
+    let cur: unknown = obj;
+    for (const k of p.split(".")) {
+      if (cur && typeof cur === "object" && k in (cur as object)) cur = (cur as Record<string, unknown>)[k];
+      else {
+        cur = undefined;
+        break;
+      }
+    }
+    if (cur !== undefined && cur !== null && cur !== "") return cur;
+  }
+  return undefined;
+}
+
+function asArray(v: unknown): unknown[] {
+  if (Array.isArray(v)) return v;
+  if (v && typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    if (Array.isArray(o.data)) return o.data;
+    if (Array.isArray(o.message)) return o.message;
+  }
+  return [];
+}
+
+function chunks<T>(arr: T[], n: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
+  return out;
+}
+
+function form(fields: Record<string, string>): string {
+  return new URLSearchParams(fields).toString();
+}
