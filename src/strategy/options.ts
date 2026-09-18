@@ -26,10 +26,11 @@ export function pickStrike(
   const p = istParts();
   if (expiry === `${p.y}-${pad(p.m)}-${pad(p.d)}` && p.hh * 60 + p.mm >= 13 * 60) return null;
   const side = chain.filter((c) => c.right === right && c.ltp >= 80 && c.ltp <= 250);
+  // The chain endpoint has no bid/ask; when absent the spread is checked from the live quote at order time.
   const ok = side.filter((c) => {
-    const mid = (c.bid && c.ask ? (c.bid + c.ask) / 2 : c.ltp) || c.ltp;
-    const spr = c.bid && c.ask && mid ? (c.ask - c.bid) / mid : 1;
-    return spr <= 0.01;
+    if (!c.bid || !c.ask) return true;
+    const mid = (c.bid + c.ask) / 2;
+    return (c.ask - c.bid) / mid <= 0.01;
   });
   if (!ok.length) return null;
   ok.sort((a, b) => Math.abs(a.strike - spot) - Math.abs(b.strike - spot));

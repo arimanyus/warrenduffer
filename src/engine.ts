@@ -378,6 +378,17 @@ export class Engine {
     if (!c) return;
     const optPnl = (db.prepare("SELECT COALESCE(SUM(pnl),0) AS p FROM trades WHERE date=? AND leg='options'").get(istDateStr()) as { p: number }).p;
     if (optPnl <= -risk.optionDailyLossCap) return;
+    // Chain has no book: pull a live quote for the strike and enforce the 1% spread rule here.
+    try {
+      const [q] = await this.client.quotes([{ token: c.token, segment: "nse_fo" }]);
+      if (!q?.bid || !q.ask) return;
+      if ((q.ask - q.bid) / ((q.ask + q.bid) / 2) > 0.01) return;
+      c.bid = q.bid;
+      c.ask = q.ask;
+      c.ltp = q.ltp || c.ltp;
+    } catch {
+      return;
+    }
     const prem = (c.bid || c.ltp) * c.lotSize;
     if (prem > getCapital() - this.usedNotional()) return;
     const { stop, target } = optionStops(c.bid || c.ltp);

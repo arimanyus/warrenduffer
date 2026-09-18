@@ -65,6 +65,7 @@ export class KotakClient {
   /** Called with every raw response; used by scripts/probe.ts to verify field names. */
   onRaw?: (endpoint: string, body: unknown) => void;
   private scrips = new Map<string, Instrument>();
+  private byToken = new Map<string, Instrument>();
   private foScrips: Instrument[] = [];
   private relogging = false;
 
@@ -137,6 +138,7 @@ export class KotakClient {
     });
     const paths = (pick(res, ["data.filesPaths", "filesPaths"]) as string[] | undefined) ?? [];
     this.scrips.clear();
+    this.byToken.clear();
     this.foScrips = [];
     for (const url of paths) {
       const u = url.toLowerCase();
@@ -146,10 +148,14 @@ export class KotakClient {
       await this.limiter.takeRequest();
       const text = await fetch(url).then((r) => r.text());
       const parsed = parseScripCsv(text, isCm ? "nse_cm" : "nse_fo");
-      if (isCm) for (const i of parsed) this.scrips.set(i.symbol, i);
-      else this.foScrips = parsed;
+      if (isCm) {
+        for (const i of parsed) {
+          this.scrips.set(i.symbol, i);
+          this.byToken.set(i.token, i);
+        }
+      } else this.foScrips = parsed;
     }
-    this.scrips.set(INDEX_TOKEN, {
+    const index: Instrument = {
       symbol: INDEX_TOKEN,
       token: INDEX_TOKEN,
       segment: "nse_cm",
@@ -157,7 +163,10 @@ export class KotakClient {
       lotSize: 1,
       tradingSymbol: INDEX_TOKEN,
       name: "Nifty 50",
-    });
+    };
+    this.scrips.set(INDEX_TOKEN, index);
+    this.byToken.set(INDEX_TOKEN, index);
+    if (!this.scrips.size) throw new KotakError("scrip master parsed 0 cash instruments", 500);
   }
 
   getInstrument(symbol: string): Instrument | undefined {
@@ -172,28 +181,17 @@ export class KotakClient {
     return this.foScrips;
   }
 
+  /** GET {baseUrl}/script-details/1.0/quotes/neosymbol/{seg|token,...}/all — verified 2026-09-18. Index token is its name, e.g. "Nifty 50". */
   async quotes(tokens: { token: string; segment: string }[]): Promise<Quote[]> {
     if (!tokens.length) return [];
+    const sess = await this.ensureSession();
     const out: Quote[] = [];
     for (const chunk of chunks(tokens, 25)) {
       await this.limiter.takeRequest();
-      const body = {
-        instrument_tokens: chunk.map((t) => ({
-          instrument_token: t.token,
-          exchange_segment: t.segment,
-        })),
-        quote_type: "all",
-      };
-      const sess = this.session;
-      const url = sess
-        ? `${sess.baseUrl}/script-details/1.0/quotes`
-        : "https://mis.kotaksecurities.com/script-details/1.0/quotes";
-      const res = await this.authed("POST", url, {
-        headers: this.tokenHeaders(),
-        body: JSON.stringify(body),
-        order: false,
-      });
-      const list = asArray(pick(res, ["data", "message", "quotes"]) ?? res);
+      const neo = chunk.map((t) => encodeURIComponent(`${t.segment}|${t.token}`)).join(",");
+      const url = `${sess.baseUrl}/script-details/1.0/quotes/neosymbol/${neo}/all`;
+      const res = await this.authed("GET", url, { headers: this.tokenHeaders(), order: false });
+      const list = Array.isArray(res) ? res : asArray(pick(res, ["data", "message", "quotes"]) ?? res);
       for (const row of list) out.push(this.normalizeQuote(row));
     }
     return out.filter((q) => q.token);
@@ -247,27 +245,36 @@ export class KotakClient {
     let url = `${sess.baseUrl}/market-data/1.0/watchlist/option-chain?exchange=nse_fo&underlying=${underlying}&instrument_type=option&count=20`;
     if (expiry) url += `&expiry=${expiry}`;
     const res = await this.authed("GET", url, { headers: this.tokenHeaders(), order: false });
+    // Verified shape: { common_data: { mktLot, expiryDt }, call: [{ inst: { neoSymbol: "nse_fo|56825", symbol, optType, strkPrc, exp }, quote: { ltp, o, h, l, c, vol }, oi }], put: [...] }
     const data = (pick(res, ["data"]) ?? res) as Record<string, unknown>;
-    const calls = asArray(data.ce ?? data.calls ?? data.call);
-    const puts = asArray(data.pe ?? data.puts ?? data.put);
+    const common = (data.common_data as Record<string, unknown> | undefined) ?? {};
+    const lot = Number(common.mktLot ?? 65) || 65;
+    const calls = asArray(data.call ?? data.ce ?? data.calls);
+    const puts = asArray(data.put ?? data.pe ?? data.puts);
     const out: OptionContract[] = [];
-    for (const row of [...calls, ...puts]) {
+    const push = (row: unknown, fallbackRight: "CE" | "PE") => {
       const r = row as Record<string, unknown>;
-      const right = String(r.option_type ?? r.right ?? r.instrumentType ?? (calls.includes(row) ? "CE" : "PE")).toUpperCase();
+      const inst = (r.inst as Record<string, unknown> | undefined) ?? r;
+      const quote = (r.quote as Record<string, unknown> | undefined) ?? r;
+      const neo = String(inst.neoSymbol ?? "");
+      const token = neo.includes("|") ? neo.split("|")[1] : String(inst.instrument_token ?? inst.token ?? "");
+      const right = String(inst.optType ?? inst.option_type ?? fallbackRight).toUpperCase().includes("P") ? "PE" : "CE";
       out.push({
-        symbol: String(r.trading_symbol ?? r.trdSymbol ?? r.symbol ?? ""),
-        token: String(r.instrument_token ?? r.token ?? r.pSymbol ?? ""),
-        tradingSymbol: String(r.trading_symbol ?? r.trdSymbol ?? r.symbol ?? ""),
-        strike: Number(r.strike ?? r.strike_price ?? 0),
-        right: right.includes("P") ? "PE" : "CE",
-        expiry: String(r.expiry ?? expiry ?? ""),
-        lotSize: Number(r.lot_size ?? r.lotSize ?? 75) || 75,
-        tickSize: Number(r.tick_size ?? 0.05) || 0.05,
-        ltp: Number(r.ltp ?? r.last_traded_price ?? 0),
-        bid: Number(r.bid ?? r.best_bid ?? r.bp ?? 0),
-        ask: Number(r.ask ?? r.best_ask ?? r.sp ?? 0),
+        symbol: String(inst.symbol ?? inst.trading_symbol ?? ""),
+        token,
+        tradingSymbol: String(inst.symbol ?? inst.trading_symbol ?? ""),
+        strike: Number(inst.strkPrc ?? inst.strike ?? 0),
+        right,
+        expiry: String(inst.exp ?? common.expiryDt ?? expiry ?? ""),
+        lotSize: lot,
+        tickSize: 0.05,
+        ltp: Number(quote.ltp ?? 0),
+        bid: Number(quote.bid ?? quote.bp ?? 0),
+        ask: Number(quote.ask ?? quote.sp ?? 0),
       });
-    }
+    };
+    for (const row of calls) push(row, "CE");
+    for (const row of puts) push(row, "PE");
     return out.filter((c) => c.token && c.strike);
   }
 
@@ -283,25 +290,30 @@ export class KotakClient {
   }): Promise<MarginCheck> {
     const sess = await this.ensureSession();
     await this.limiter.takeOrder();
+    // check-margin uses long keys (verified); place/modify use the short ones.
     const jData = {
-      es: args.segment,
-      tk: args.token,
-      ts: args.tradingSymbol,
-      tt: args.side === "buy" ? "B" : "S",
-      qt: String(args.qty),
-      pr: String(args.price),
-      pt: args.orderType ?? "L",
-      pc: args.product ?? "MIS",
+      brkName: "KOTAK",
+      brnchId: "ONLINE",
+      exSeg: args.segment,
+      tok: args.token,
+      trdSym: args.tradingSymbol,
+      trnsTp: args.side === "buy" ? "B" : "S",
+      qty: String(args.qty),
+      prc: String(args.price),
+      prcTp: args.orderType ?? "L",
+      prod: args.product ?? "MIS",
+      trgPrc: "0",
     };
     const res = await this.authed("POST", `${sess.baseUrl}/quick/user/check-margin`, {
       headers: this.sessionFormHeaders(),
       body: form({ jData: JSON.stringify(jData) }),
       order: true,
     });
-    const availRaw = pick(res, ["data.avlCash", "data.avlMrgn", "avlCash"]);
-    const reqRaw = pick(res, ["data.ordMrgn", "data.reqdMrgn", "data.totMrgnUsd"]);
-    const rms = String(pick(res, ["data.rmsVldtd", "data.stat"]) ?? "");
-    const insuf = Number(pick(res, ["data.insufFund"]) ?? 0);
+    // Verified response is flat: { avlCash, totMrgnUsd, mrgnUsd, ordMrgn, rmsVldtd, reqdMrgn, avlMrgn, insufFund, stat, stCode }
+    const availRaw = pick(res, ["avlCash", "data.avlCash", "avlMrgn", "data.avlMrgn"]);
+    const reqRaw = pick(res, ["ordMrgn", "totMrgnUsd", "reqdMrgn", "data.ordMrgn", "data.totMrgnUsd", "data.reqdMrgn"]);
+    const rms = String(pick(res, ["rmsVldtd", "data.rmsVldtd", "stat", "data.stat"]) ?? "");
+    const insuf = Number(pick(res, ["insufFund", "data.insufFund"]) ?? 0);
     const available = Number(availRaw ?? NaN);
     const required = Number(reqRaw ?? NaN);
     const parsed = Number.isFinite(available) && Number.isFinite(required);
@@ -448,11 +460,12 @@ export class KotakClient {
   async limits(): Promise<{ available: number; raw: unknown }> {
     const sess = await this.ensureSession();
     await this.limiter.takeRequest();
-    const res = await this.authed("GET", `${sess.baseUrl}/quick/user/limits`, {
-      headers: this.sessionHeaders(),
+    const res = await this.authed("POST", `${sess.baseUrl}/quick/user/limits`, {
+      headers: this.sessionFormHeaders(),
+      body: form({ jData: JSON.stringify({ seg: "ALL", exch: "ALL", prod: "ALL" }) }),
       order: false,
     });
-    return { available: Number(pick(res, ["data.Net", "data.avlCash", "Net"]) ?? 0), raw: res };
+    return { available: Number(pick(res, ["Net", "data.Net", "avlCash"]) ?? 0), raw: res };
   }
 
   private tokenHeaders(): Record<string, string> {
@@ -516,36 +529,42 @@ export class KotakClient {
     return json;
   }
 
+  /**
+   * Verified payload: exchange_token, display_symbol ("RELIANCE-EQ" / "Nifty 50-IN"), exchange, ltp,
+   * last_traded_quantity, total_buy, total_sell, last_volume, ohlc{open,high,low,close},
+   * depth{buy:[{price,quantity,orders}],sell:[...]}. Index rows have zero depth/volume.
+   */
   private normalizeQuote(row: unknown): Quote {
     const r = row as Record<string, unknown>;
     const ohlc = (r.ohlc as Record<string, unknown> | undefined) ?? {};
     const depth = (r.depth as Record<string, unknown> | undefined) ?? {};
     const bids = levels(depth.buy ?? r.buy ?? r.bids);
     const asks = levels(depth.sell ?? r.sell ?? r.asks);
-    const bid = Number(r.buy_price ?? r.bp ?? bids[0]?.price ?? 0);
-    const ask = Number(r.sell_price ?? r.sp ?? asks[0]?.price ?? 0);
-    const ltp = Number(r.last_traded_price ?? r.ltp ?? r.lastPrice ?? 0);
-    if (bid && !bids.length) bids.push({ price: bid, qty: Number(r.buy_quantity ?? 0) });
-    if (ask && !asks.length) asks.push({ price: ask, qty: Number(r.sell_quantity ?? 0) });
+    const ltp = Number(r.ltp ?? r.last_traded_price ?? r.iv ?? 0);
+    const bid = bids[0]?.price ?? Number(r.buy_price ?? r.bp ?? 0);
+    const ask = asks[0]?.price ?? Number(r.sell_price ?? r.sp ?? 0);
+    const token = String(r.exchange_token ?? r.instrument_token ?? r.tk ?? r.token ?? "");
+    const display = String(r.display_symbol ?? r.trading_symbol ?? r.ts ?? r.trdSym ?? "");
+    const inst = this.byToken.get(token);
     return {
-      symbol: String(r.trading_symbol ?? r.ts ?? r.trdSym ?? "").replace(/-EQ$/i, ""),
-      token: String(r.instrument_token ?? r.tk ?? r.token ?? ""),
-      segment: String(r.exchange_segment ?? r.es ?? "nse_cm"),
+      symbol: inst?.symbol ?? (token === INDEX_TOKEN ? INDEX_TOKEN : display.replace(/-(EQ|IN)$/i, "")),
+      token,
+      segment: String(r.exchange ?? r.exchange_segment ?? r.es ?? "nse_cm"),
       ts: Date.now(),
       ltp,
       ltq: Number(r.last_traded_quantity ?? r.ltq ?? 0),
-      volume: Number(r.volume ?? r.v ?? 0),
+      volume: Number(r.last_volume ?? r.volume ?? r.v ?? 0),
       bid: bid || ltp,
       ask: ask || ltp,
-      tbq: Number(r.total_buy_quantity ?? r.tbq ?? 0),
-      tsq: Number(r.total_sell_quantity ?? r.tsq ?? 0),
+      tbq: Number(r.total_buy ?? r.total_buy_quantity ?? r.tbq ?? 0),
+      tsq: Number(r.total_sell ?? r.total_sell_quantity ?? r.tsq ?? 0),
       bids,
       asks,
-      open: Number(ohlc.open ?? r.open ?? r.op ?? 0),
-      high: Number(ohlc.high ?? r.high ?? r.h ?? 0),
-      low: Number(ohlc.low ?? r.low ?? r.lo ?? 0),
-      close: Number(ohlc.close ?? r.close ?? r.c ?? ltp),
-      tickSize: Number(r.precision ?? 0.05) || 0.05,
+      open: Number(ohlc.open ?? r.open ?? r.op ?? r.openingPrice ?? 0),
+      high: Number(ohlc.high ?? r.high ?? r.h ?? r.highPrice ?? 0),
+      low: Number(ohlc.low ?? r.low ?? r.lo ?? r.lowPrice ?? 0),
+      close: Number(ohlc.close ?? r.close ?? r.c ?? r.ic ?? ltp),
+      tickSize: inst?.tickSize ?? 0.05,
     };
   }
 }

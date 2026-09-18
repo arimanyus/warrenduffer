@@ -71,7 +71,7 @@ export const cfg = {
   kotakTotpSecret: str("KOTAK_TOTP_SECRET"),
   aiGatewayKey: str("AI_GATEWAY_API_KEY"),
   typesafeKey: str("TYPESAFE_AI_API_KEY"),
-  model: (str("MODEL", "mock") as ModelName) === "jev" ? "jev" : "mock",
+  model: (/jev/i.test(str("MODEL", "mock")) ? "jev" : "mock") as ModelName,
   optionsMode: str("OPTIONS_MODE", "off") === "on" ? "on" : "off",
   universe: str("UNIVERSE", "nifty50"),
   decisionIntervalS: num("DECISION_INTERVAL_S", 60),
