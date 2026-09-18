@@ -12,15 +12,15 @@ function main(): void {
   const dd = maxDd(equity.map((t) => t.pnl));
 
   const checks = [
-    { id: 2, name: "20 paper days + 40 trades", pass: days >= 20 && equity.length >= 40, detail: `${days} days ${equity.length} trades` },
+    { id: 2, name: "20 days + 40 trades", pass: days >= 20 && equity.length >= 40, detail: `${days} days ${equity.length} trades` },
     { id: 3, name: "expectancy>0 and PF>=1.2", pass: exp > 0 && pf >= 1.2, detail: `E=${exp.toFixed(2)} PF=${pf.toFixed(2)}` },
-    { id: 4, name: "max paper DD <= 3000", pass: dd >= -3000, detail: `dd=${dd.toFixed(0)}` },
+    { id: 4, name: "max DD <= 3000", pass: dd >= -3000, detail: `dd=${dd.toFixed(0)}` },
   ];
   console.log("=== equity gates (run calibrate.ts for gate 1) ===");
   for (const c of checks) console.log(c.pass ? "PASS" : "FAIL", c.name, c.detail);
-  console.log("gate 5: live calibration — compare setup buckets on paper decisions vs outcomes");
-  console.log("gate 6: 5 days live at 1 share — manual");
-  console.log("gate 7: first live month DAILY_LOSS_CAP=1000");
+  console.log("gate 5: calibration on stored decisions vs outcomes");
+  console.log("gate 6: first week LIVE_QTY=1");
+  console.log("gate 7: DAILY_LOSS_CAP=1000");
   if (checks[1]?.pass) console.log("unlock: DECISION_INTERVAL_S=30 and SFeed websocket");
 
   if (options.length) {
@@ -30,7 +30,7 @@ function main(): void {
       (sum(options.filter((t) => t.pnl > 0).map((t) => t.pnl)) || 0) /
       (Math.abs(sum(options.filter((t) => t.pnl < 0).map((t) => t.pnl))) || 1);
     const odd = maxDd(options.map((t) => t.pnl));
-    console.log("\n=== options paper gates ===");
+    console.log("\n=== options gates ===");
     console.log(odays >= 20 && options.length >= 40 ? "PASS" : "FAIL", "20d/40t", odays, options.length);
     console.log(oexp > 0 && opf >= 1.3 ? "PASS" : "FAIL", "E/PF", oexp.toFixed(2), opf.toFixed(2));
     console.log(odd >= -4000 ? "PASS" : "FAIL", "dd", odd.toFixed(0));

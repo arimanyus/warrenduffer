@@ -1,4 +1,4 @@
-import { cfg, risk } from "../config.js";
+import { risk } from "../config.js";
 import { db } from "../db.js";
 import { alert } from "../alerts.js";
 import type { KotakClient } from "../kotak/client.js";
@@ -115,6 +115,7 @@ export class LiveExecutor implements Executor {
   }
 
   async tick(_quotes: Map<string, Quote>): Promise<void> {
+    if (!this.client.session) return;
     if (Date.now() - this.lastBrokerPoll < 2000) return;
     this.lastBrokerPoll = Date.now();
     const remote = await this.client.orders();
@@ -142,6 +143,5 @@ export class LiveExecutor implements Executor {
         await this.cancel(order);
       }
     }
-    void cfg;
   }
 }

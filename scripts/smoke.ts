@@ -1,6 +1,5 @@
 import { upsertBar } from "../src/db.js";
 import { buildFeatures, buildIndexFeatures } from "../src/data/features.js";
-import { PaperExecutor } from "../src/executor/paper.js";
 import { MockModel } from "../src/model/mock.js";
 import { pickBest, runStage1, runStage2 } from "../src/strategy/continuation.js";
 import { computeGovernor } from "../src/strategy/governor.js";
@@ -68,36 +67,7 @@ async function main(): Promise<void> {
   const sb = stopBps(fR.atr1m, fR.last);
   const qty = sb ? sizeQty(fR.last, sb, "A") : 0;
   const g = computeGovernor();
-  const paper = new PaperExecutor();
-  let filled = false;
-  paper.onFill = () => {
-    filled = true;
-  };
-  const order = await paper.place({
-    symbol: "RELIANCE",
-    token: "123",
-    segment: "nse_cm",
-    tradingSymbol: "RELIANCE-EQ",
-    side: "buy",
-    qty: 10,
-    price: 1432,
-    kind: "entry",
-    tag: "smoke",
-    decisionId: null,
-    leg: "equity",
-    tier: "A",
-  });
-  await paper.tick(new Map([["RELIANCE", quote("RELIANCE", 1431.9)]]));
-  console.log({
-    regime: s1.regime,
-    longs: s1.longs,
-    best: best?.symbol,
-    qty,
-    governor: g.reason,
-    order: order.id,
-    filled,
-  });
-  if (!filled) throw new Error("paper fill failed");
+  console.log({ regime: s1.regime, longs: s1.longs, best: best?.symbol, qty, governor: g.reason });
   console.log("smoke ok");
 }
 

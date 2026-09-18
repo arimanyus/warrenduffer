@@ -17,6 +17,7 @@
   "stage1MinProb": 0.55,
   "riskOffHalt": 0.7,
   "exitNow": 0.7,
+  "takeProfit": 0.7,
   "thesisBroken": 1.0,
   "thesisWeak": 1.5,
   "extendedTake": 1.5,

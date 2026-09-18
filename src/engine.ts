@@ -6,9 +6,7 @@ import { buildFeatures, buildIndexFeatures } from "./data/features.js";
 import { LiveFeed } from "./data/feed.js";
 import { buildUniverse } from "./data/universe.js";
 import { contextFor, db, insertEvent, pruneSnapshots, todayPnl } from "./db.js";
-import type { Executor } from "./executor/types.js";
 import { LiveExecutor } from "./executor/live.js";
-import { PaperExecutor } from "./executor/paper.js";
 import type { KotakClient } from "./kotak/client.js";
 import { estimateEntryFriction, fillCost } from "./kotak/costs.js";
 import { INDEX_SYMBOL, INDEX_TOKEN } from "./kotak/scrip.js";
@@ -45,13 +43,13 @@ export class Engine {
   lastCandidates: Candidate[] = [];
   taken: Candidate | null = null;
   model: Model;
-  exec: Executor;
+  exec: LiveExecutor;
   feed: LiveFeed;
   lastStage2: Record<string, unknown> = {};
 
   constructor(private client: KotakClient) {
     this.model = createModel();
-    this.exec = cfg.mode === "live" ? new LiveExecutor(client) : new PaperExecutor();
+    this.exec = new LiveExecutor(client);
     this.exec.onFill = (f) => this.handleFill(f);
     this.feed = new LiveFeed(
       client,
@@ -76,14 +74,14 @@ export class Engine {
     await this.client.login();
     await this.client.loadScrips();
     this.rebuildUniverse();
-    if (cfg.mode === "live") await this.reconcile();
+    await this.reconcile();
     try {
       const ctx = await runDailyContext(this.model, this.client.allCash());
       this.halfSizeDay = ctx.halfSize;
     } catch (e) {
       insertEvent("context", String(e));
     }
-    insertEvent("start", `mode=${cfg.mode} model=${this.model.name}`);
+    insertEvent("start", `live model=${this.model.name}`);
     pruneSnapshots(30 * 24 * 3600_000);
   }
 
@@ -120,7 +118,7 @@ export class Engine {
     this.manageEntries();
     await this.hardExits();
     if (Date.now() - this.lastUniverseRebuild > 60_000) this.rebuildUniverse();
-    if (cfg.optionsMode === "paper" && Date.now() - this.lastChain > 60_000) {
+    if (cfg.optionsMode === "on" && Date.now() - this.lastChain > 60_000) {
       try {
         const exps = await this.client.expiries();
         this.expiry = exps[0] ?? "";
@@ -208,7 +206,7 @@ export class Engine {
     this.taken = best;
     if (best && !this.positions.has(best.symbol)) await this.enterEquity(best, featMap.get(best.symbol)!);
 
-    if (cfg.optionsMode === "paper") {
+    if (cfg.optionsMode === "on") {
       const sig = optionSignal({
         niftyLong: s1.niftyLong,
         niftyShort: s1.niftyShort,
@@ -230,28 +228,26 @@ export class Engine {
     const qty = sizeQty(f.last, sb, tier);
     if (qty < 1) return;
     const g = computeGovernor();
-    const ga = governorAllows(g, tier === "B");
+    const ga = governorAllows(g);
     if (!ga.ok) return;
-    const cap = canEnterMore(this.positions.size, tier === "B");
+    const cap = canEnterMore(this.positions.size);
     if (!cap.ok) return;
     const side = c.side === "long" ? "buy" : "sell";
     const px = side === "buy" ? f.bid : f.ask;
     const stop = stopPrice(c.side, px, sb, f.tickSize);
     const target = targetPrice(c.side, px, sb, f.tickSize);
-    if (cfg.mode === "live") {
-      try {
-        const m = await this.client.marginRequired({
-          segment: inst.segment,
-          token: inst.token,
-          tradingSymbol: inst.tradingSymbol,
-          side,
-          qty,
-          price: px,
-        });
-        if (!m.ok || m.required > m.available * 0.8) return;
-      } catch {
-        return;
-      }
+    try {
+      const m = await this.client.marginRequired({
+        segment: inst.segment,
+        token: inst.token,
+        tradingSymbol: inst.tradingSymbol,
+        side,
+        qty,
+        price: px,
+      });
+      if (!m.ok || m.required > m.available * 0.8) return;
+    } catch {
+      return;
     }
     await this.exec.place({
       symbol: c.symbol,
@@ -277,8 +273,6 @@ export class Engine {
     if (!c) return;
     const optPnl = (db.prepare("SELECT COALESCE(SUM(pnl),0) AS p FROM trades WHERE date=? AND leg='options'").get(istDateStr()) as { p: number }).p;
     if (optPnl <= -risk.optionDailyLossCap) return;
-    const friction = (db.prepare("SELECT COALESCE(SUM(friction),0) AS f FROM trades WHERE date=? AND leg='options'").get(istDateStr()) as { f: number }).f;
-    if (friction >= risk.optionFrictionBudget) return;
     const { stop, target } = optionStops(c.bid || c.ltp);
     await this.exec.place({
       symbol: c.tradingSymbol || c.symbol,
@@ -412,7 +406,7 @@ export class Engine {
   }
 
   private findOrder(id: string): WorkingOrder | undefined {
-    const orders = (this.exec as PaperExecutor | LiveExecutor).orders;
+    const orders = this.exec.orders;
     if (!orders) return undefined;
     return [...orders.values()].find((o) => String(o.id) === id || o.brokerId === id);
   }
@@ -422,7 +416,8 @@ export class Engine {
       const q = this.quotes.get(pos.symbol);
       if (!q) continue;
       const holdMin = (Date.now() - pos.openedAt) / 60_000;
-      if (pos.leg === "options" && holdMin >= risk.optionTimeStopMin) {
+      const u = unrealized(pos, q);
+      if (pos.leg === "options" && holdMin >= risk.optionTimeStopMin && u <= 0) {
         await this.exitPosition(pos, "time");
         continue;
       }
@@ -432,20 +427,12 @@ export class Engine {
       }
       if (pos.side === "short" && q.ltp >= pos.stop) {
         await this.exitPosition(pos, "stop");
-        continue;
-      }
-      if (pos.side === "long" && q.ltp >= pos.target) {
-        await this.exitPosition(pos, "target");
-        continue;
-      }
-      if (pos.side === "short" && q.ltp <= pos.target) {
-        await this.exitPosition(pos, "target");
       }
     }
   }
 
   private manageEntries(): void {
-    const orders = (this.exec as PaperExecutor | LiveExecutor).orders;
+    const orders = this.exec.orders;
     if (!orders) return;
     for (const o of orders.values()) {
       if (o.kind !== "entry") continue;
@@ -602,7 +589,7 @@ export class Engine {
 
   snapshot() {
     return {
-      mode: cfg.mode,
+      mode: "live",
       optionsMode: cfg.optionsMode,
       model: this.model.name,
       session: !!this.client.session,

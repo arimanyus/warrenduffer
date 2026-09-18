@@ -105,7 +105,7 @@ async function main(): Promise<void> {
     const lo = v.nLo ? v.lo / v.nLo : 0;
     console.log(k, "hi", (hi * 100).toFixed(1), "lo", (lo * 100).toFixed(1));
   }
-  console.log("suggested: keep thresholds in risk.json if gap >= 10pp, else do not paper trade.");
+  console.log("suggested: keep thresholds in risk.json if gap >= 10pp, else stop and rethink.");
   void cfg;
 }
 

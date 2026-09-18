@@ -1,8 +1,8 @@
 const $ = (id) => document.getElementById(id);
 
 function render(s) {
-  $("mode").textContent = `${s.mode} / opt ${s.optionsMode}`;
-  $("mode").className = "pill " + (s.mode === "live" ? "r" : "g");
+  $("mode").textContent = `live / opt ${s.optionsMode}`;
+  $("mode").className = "pill r";
   $("model").textContent = s.model;
   $("session").textContent = s.session ? "kotak ok" : "no session";
   $("lat").textContent = `jev p50 ${s.latencyP50 || 0}ms`;
@@ -10,8 +10,8 @@ function render(s) {
   $("regime").innerHTML = `regime <b>${s.regime}</b> · risk_off ${(s.riskOff || 0).toFixed(2)} · nifty_long ${(s.niftyLong || 0).toFixed(2)} · nifty_short ${(s.niftyShort || 0).toFixed(2)}`;
   const g = s.governor || {};
   $("today").innerHTML = `
-    <div>PnL <b class="${s.todayPnl >= 0 ? "g" : "r"}">${(s.todayPnl || 0).toFixed(0)}</b> / cap ${s.dailyLossCap}</div>
-    <div>friction ${(s.todayFriction || 0).toFixed(0)} / ${s.frictionBudget} · entries ${s.todayEntries} · allow ${g.allowance ?? "–"} (${g.reason ?? ""})</div>
+    <div>PnL <b class="${s.todayPnl >= 0 ? "g" : "r"}">${(s.todayPnl || 0).toFixed(0)}</b> · loss halt ${s.dailyLossCap}</div>
+    <div>entries ${s.todayEntries} · allow ${g.allowance < 0 || g.allowance == null ? "uncapped" : g.allowance} (${g.reason ?? ""})</div>
     <div>${s.halted ? '<span class="r">HALTED</span>' : ""} ${s.killed ? '<span class="r">KILLED</span>' : ""}</div>`;
   $("positions").innerHTML = (s.positions || [])
     .map((p) => `<div>${p.symbol} ${p.side} ${p.qty} @ ${p.entryPrice} stop ${p.stop} u=${p.unrealized?.toFixed?.(0) ?? "–"} thesis=${p.thesis ?? "–"}</div>`)

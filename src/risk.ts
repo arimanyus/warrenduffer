@@ -1,5 +1,5 @@
 import { cfg, risk } from "./config.js";
-import { todayEntries, todayFriction, todayPnl } from "./db.js";
+import { todayEntries, todayPnl } from "./db.js";
 import type { OpenPosition, PositionSide, Quote, Tier } from "./types.js";
 
 export function stopBps(atr1m: number, price: number): number | null {
@@ -11,7 +11,7 @@ export function stopBps(atr1m: number, price: number): number | null {
 }
 
 export function sizeQty(price: number, stopBpsV: number, tier: Tier): number {
-  if (cfg.mode === "live" && cfg.liveQty > 0) return Math.max(1, Math.floor(cfg.liveQty));
+  if (cfg.liveQty > 0) return Math.max(1, Math.floor(cfg.liveQty));
   const riskQty = cfg.riskPerTrade / ((stopBpsV * price) / 1e4);
   const notionalQty = cfg.maxNotional / price;
   const mult = tier === "A" ? 1 : 0.5;
@@ -33,12 +33,9 @@ export function roundTick(price: number, tick: number): number {
   return Math.round(price / tick) * tick;
 }
 
-export function canEnterMore(openCount: number, halfSize = false): { ok: boolean; reason: string } {
+export function canEnterMore(openCount: number): { ok: boolean; reason: string } {
   if (openCount >= cfg.maxPositions) return { ok: false, reason: "max_positions" };
   if (todayPnl() <= -cfg.dailyLossCap) return { ok: false, reason: "daily_loss_cap" };
-  const friction = todayFriction();
-  if (friction >= cfg.dailyFrictionBudget) return { ok: false, reason: "friction_budget" };
-  if (halfSize && friction >= cfg.dailyFrictionBudget) return { ok: false, reason: "friction_budget" };
   return { ok: true, reason: "" };
 }
 

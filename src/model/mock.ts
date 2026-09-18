@@ -64,6 +64,7 @@ function noulFrom(k: string, s: Record<string, unknown>): number {
   if (k === "risk_off") return label(s, "m5") === "down" && Number((s.index as { breadthAboveVwap?: number })?.breadthAboveVwap ?? 1) < 0.3 ? 0.72 : 0.2;
   if (k === "one_sided") return 0.62;
   if (k === "exit_now") return 0.2;
+  if (k === "take_profit") return 0.2;
   if (k === "event_today") return 0.15;
   if (k === "risk_event_today") return 0.1;
   return 0.45;

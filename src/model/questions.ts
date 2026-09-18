@@ -106,6 +106,11 @@ export const positionQuestions: Record<string, Question> = {
     instructions: "How far and fast has `symbol` moved in the direction of `position` relative to its ATR?",
     criteria: ["Not extended", "Somewhat extended", "Very extended"],
   },
+  take_profit: {
+    type: "noul",
+    instructions:
+      "Should this `position` take profit now from the current state? The move in its direction is done or fading. Judge only what is visible. Do not forecast.",
+  },
 };
 
 export const attributionQuestions: Record<string, Question> = {

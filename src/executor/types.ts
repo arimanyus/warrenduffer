@@ -22,6 +22,7 @@ export interface PlaceIntent {
 
 export interface Executor {
   name: string;
+  orders: Map<number, WorkingOrder>;
   place(intent: PlaceIntent): Promise<WorkingOrder>;
   modify(order: WorkingOrder, price: number, trigger?: number): Promise<void>;
   cancel(order: WorkingOrder): Promise<void>;

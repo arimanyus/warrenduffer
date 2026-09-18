@@ -4,8 +4,7 @@ import { config as loadEnv } from "dotenv";
 
 loadEnv();
 
-export type Mode = "paper" | "live";
-export type OptionsMode = "paper" | "off";
+export type OptionsMode = "on" | "off";
 export type ModelName = "jev" | "mock";
 export type OnRestart = "adopt" | "flatten";
 
@@ -30,6 +29,7 @@ export interface RiskConfig {
   stage1MinProb: number;
   riskOffHalt: number;
   exitNow: number;
+  takeProfit: number;
   thesisBroken: number;
   thesisWeak: number;
   extendedTake: number;
@@ -72,8 +72,7 @@ export const cfg = {
   aiGatewayKey: str("AI_GATEWAY_API_KEY"),
   typesafeKey: str("TYPESAFE_AI_API_KEY"),
   model: (str("MODEL", "mock") as ModelName) === "jev" ? "jev" : "mock",
-  mode: (str("MODE", "paper") as Mode) === "live" ? "live" : "paper",
-  optionsMode: (str("OPTIONS_MODE", "paper") as OptionsMode) === "off" ? "off" : "paper",
+  optionsMode: str("OPTIONS_MODE", "off") === "on" ? "on" : "off",
   universe: str("UNIVERSE", "nifty50"),
   decisionIntervalS: num("DECISION_INTERVAL_S", 60),
   riskPerTrade: num("RISK_PER_TRADE", 300),

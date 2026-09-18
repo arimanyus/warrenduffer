@@ -12,6 +12,7 @@ export interface ExitDecision {
   thesis: number;
   exitNow: number;
   extended: number;
+  takeProfit: number;
 }
 
 export async function managePosition(
@@ -22,7 +23,9 @@ export async function managePosition(
   unrealised: number,
 ): Promise<ExitDecision> {
   const holdMin = (Date.now() - pos.openedAt) / 60_000;
-  if (holdMin >= risk.timeStopMin) return { action: "exit", reason: "time", thesis: pos.thesis ?? 2, exitNow: 0, extended: 0 };
+  if (holdMin >= risk.timeStopMin && unrealised <= 0) {
+    return { action: "exit", reason: "time", thesis: pos.thesis ?? 2, exitNow: 0, extended: 0, takeProfit: 0 };
+  }
 
   const state = stage2State(feat, index, {
     side: pos.side,
@@ -30,21 +33,29 @@ export async function managePosition(
     minutesHeld: holdMin,
   });
   const r = await model.evaluate(state, positionQuestions, "position", pos.symbol);
-  if (!r.ok) return { action: "hold", reason: "jev_fail", thesis: pos.thesis ?? 2, exitNow: 0, extended: 0 };
+  if (!r.ok) return { action: "hold", reason: "jev_fail", thesis: pos.thesis ?? 2, exitNow: 0, extended: 0, takeProfit: 0 };
 
   const thesis = r.answers.thesis?.score ?? 2;
   const exitNow = r.answers.exit_now?.noul ?? 0;
   const extended = r.answers.extended?.score ?? 0;
+  const takeProfit = r.answers.take_profit?.noul ?? 0;
   const stopDist = Math.abs(pos.entryPrice - pos.stop);
 
   if (thesis < risk.thesisBroken || exitNow >= risk.exitNow) {
-    return { action: "exit", reason: thesis < risk.thesisBroken ? "thesis_break" : "exit_now", thesis, exitNow, extended };
+    return {
+      action: "exit",
+      reason: thesis < risk.thesisBroken ? "thesis_break" : "exit_now",
+      thesis,
+      exitNow,
+      extended,
+      takeProfit,
+    };
   }
-  if (extended >= risk.extendedTake && unrealised >= stopDist * pos.qty) {
-    return { action: "take_profit", reason: "extended", thesis, exitNow, extended };
+  if (takeProfit >= risk.takeProfit) {
+    return { action: "take_profit", reason: "jev_take_profit", thesis, exitNow, extended, takeProfit };
   }
   if (thesis < risk.thesisWeak && unrealised >= 0.5 * stopDist * pos.qty) {
-    return { action: "breakeven", reason: "weaken_be", thesis, exitNow, extended };
+    return { action: "breakeven", reason: "weaken_be", thesis, exitNow, extended, takeProfit };
   }
-  return { action: "hold", reason: "intact", thesis, exitNow, extended };
+  return { action: "hold", reason: "intact", thesis, exitNow, extended, takeProfit };
 }
