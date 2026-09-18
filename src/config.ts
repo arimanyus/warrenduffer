@@ -27,6 +27,8 @@ export interface RiskConfig {
   tierASetup: number;
   tierAScore: number;
   stage1MinProb: number;
+  wildMinProb: number;
+  wildTierA: number;
   riskOffHalt: number;
   exitNow: number;
   takeProfit: number;
@@ -74,7 +76,10 @@ export const cfg = {
   model: (/jev/i.test(str("MODEL", "mock")) ? "jev" : "mock") as ModelName,
   optionsMode: str("OPTIONS_MODE", "off") === "on" ? "on" : "off",
   universe: str("UNIVERSE", "nifty50"),
-  decisionIntervalS: num("DECISION_INTERVAL_S", 60),
+  decisionIntervalS: num("DECISION_INTERVAL_S", 15),
+  positionIntervalS: num("POSITION_INTERVAL_S", 5),
+  exitConfirmVotes: num("EXIT_CONFIRM_VOTES", 2),
+  wild: str("WILD") === "1",
   riskPerTrade: num("RISK_PER_TRADE", 300),
   maxNotional: num("MAX_NOTIONAL", 150000),
   maxPositions: num("MAX_POSITIONS", 3),

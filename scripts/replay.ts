@@ -8,7 +8,7 @@
  * Fills are simulated on bars (pessimistic). Writes to data/replay-<date>.db, never the live DB.
  */
 import Database from "better-sqlite3";
-import { existsSync } from "node:fs";
+import { existsSync, unlinkSync } from "node:fs";
 
 const args = parseArgs(process.argv.slice(2));
 const date = args.date;
@@ -21,8 +21,12 @@ const port = Number(args.port ?? 8081);
 const source = args.source ?? process.env.DB_PATH ?? "data/harness.db";
 
 process.env.DB_PATH = `data/replay-${date}.db`;
+// Replay must not see the live engine's kill switch (or write to it).
+process.env.KILL_PATH = `data/replay-${date}.kill`;
 process.env.TELEGRAM_BOT_TOKEN = "";
 process.env.OPTIONS_MODE = "off";
+process.env.WILD = process.env.REPLAY_WILD ?? process.env.WILD ?? "0";
+if (existsSync(process.env.KILL_PATH)) unlinkSync(process.env.KILL_PATH);
 
 const dayStart = Date.parse(`${date}T03:45:00Z`);
 const dayEnd = Date.parse(`${date}T10:00:00Z`);
@@ -41,9 +45,9 @@ async function main(): Promise<void> {
 
   db.exec("DELETE FROM snapshots; DELETE FROM decisions; DELETE FROM rankings; DELETE FROM orders; DELETE FROM fills; DELETE FROM trades; DELETE FROM positions; DELETE FROM governor_log; DELETE FROM events;");
 
-  // 1. Bars: copy from the live DB if it has them, else fetch from Kotak.
-  let dayCount = (db.prepare("SELECT COUNT(*) AS c FROM bars_1m WHERE ts >= ? AND ts < ?").get(dayStart, dayEnd) as { c: number }).c;
-  if (dayCount < 100 && existsSync(source) && source !== process.env.DB_PATH) {
+  // 1. Bars: always refresh from the live DB (today's replay must see the latest bars), else fetch from Kotak.
+  let dayCount = 0;
+  if (existsSync(source) && source !== process.env.DB_PATH) {
     const src = new Database(source, { readonly: true });
     const rows = src.prepare("SELECT symbol, ts, open, high, low, close, volume FROM bars_1m WHERE ts >= ? AND ts < ?").all(historyFrom, dayEnd) as Bar[];
     src.close();
@@ -52,8 +56,8 @@ async function main(): Promise<void> {
     );
     db.transaction((rs: Bar[]) => rs.forEach((r) => ins.run(r)))(rows);
     console.log(`copied ${rows.length} bars from ${source}`);
-    dayCount = (db.prepare("SELECT COUNT(*) AS c FROM bars_1m WHERE ts >= ? AND ts < ?").get(dayStart, dayEnd) as { c: number }).c;
   }
+  dayCount = (db.prepare("SELECT COUNT(*) AS c FROM bars_1m WHERE ts >= ? AND ts < ?").get(dayStart, dayEnd) as { c: number }).c;
   if (dayCount < 100) {
     const { cfg } = await import("../src/config.js");
     if (!cfg.kotakAccessToken) {

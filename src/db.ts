@@ -165,7 +165,46 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS sessions (
+  id INTEGER PRIMARY KEY,
+  started_at INTEGER NOT NULL,
+  ended_at INTEGER,
+  end_reason TEXT,
+  trades INTEGER DEFAULT 0,
+  pnl REAL DEFAULT 0,
+  decisions INTEGER DEFAULT 0,
+  regime TEXT,
+  note TEXT
+);
 `);
+
+/** A live session is one RESUME → KILL/halt/flatten/shutdown span. */
+export function openSession(note: string): number {
+  const info = db.prepare("INSERT INTO sessions (started_at, note) VALUES (?, ?)").run(clock.now(), note);
+  return Number(info.lastInsertRowid);
+}
+
+export function refreshSession(id: number, regime: string | null, endReason: string | null): void {
+  const row = db.prepare("SELECT started_at FROM sessions WHERE id = ?").get(id) as { started_at: number } | undefined;
+  if (!row) return;
+  const end = clock.now();
+  const t = db.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(pnl),0) AS p FROM trades WHERE closed_at >= ? AND closed_at <= ?").get(row.started_at, end) as { n: number; p: number };
+  const d = db.prepare("SELECT COUNT(DISTINCT ts) AS n FROM decisions WHERE ts >= ? AND ts <= ? AND stage NOT LIKE 'cal:%'").get(row.started_at, end) as { n: number };
+  db.prepare("UPDATE sessions SET trades=?, pnl=?, decisions=?, regime=COALESCE(?, regime), ended_at=?, end_reason=? WHERE id=?").run(
+    t.n,
+    t.p,
+    d.n,
+    regime,
+    endReason ? end : null,
+    endReason,
+    id,
+  );
+}
+
+export function listSessions(limit = 40): unknown[] {
+  return db.prepare("SELECT * FROM sessions ORDER BY id DESC LIMIT ?").all(limit);
+}
 
 export function getSetting(key: string, fallback: string): string {
   const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | undefined;
@@ -184,6 +223,16 @@ export function getCapital(): number {
   }
   const n = Number(row.value);
   return Number.isFinite(n) ? Math.max(1000, Math.min(n, 50_000_000)) : cfg.capital;
+}
+
+/** WILD: enter on stage-1 conviction alone, several names per cycle, no re-entry cooldown. Persisted; env WILD=1 is the default. */
+export function getWild(): boolean {
+  return getSetting("wild", cfg.wild ? "1" : "0") === "1";
+}
+
+export function setWild(on: boolean): void {
+  setSetting("wild", on ? "1" : "0");
+  insertEvent("mode", on ? "WILD on: stage-1 entries, multi-name, no cooldown" : "WILD off: two-stage entries");
 }
 
 export function setCapital(n: number): number {
@@ -240,13 +289,19 @@ export function upsertBar(b: {
   ).run(b);
 }
 
+/** Offline scripts (calibrate) tag their rows so the live dashboard feed and latency stats ignore them. */
+let stagePrefix = "";
+export function setDecisionStagePrefix(p: string): void {
+  stagePrefix = p;
+}
+
 export function insertDecision(d: DecisionRow): number {
   const info = db
     .prepare(
       `INSERT INTO decisions (ts, stage, symbol, question, answer, probability, confidence, latency_ms, tokens, model_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(d.ts, d.stage, d.symbol, d.question, d.answer, d.probability, d.confidence, d.latencyMs, d.tokens, d.modelId);
+    .run(d.ts, stagePrefix + d.stage, d.symbol, d.question, d.answer, d.probability, d.confidence, d.latencyMs, d.tokens, d.modelId);
   return Number(info.lastInsertRowid);
 }
 
@@ -292,7 +347,7 @@ export function lastCooldowns(): Map<string, number> {
 }
 
 export function recentDecisions(limit = 200): unknown[] {
-  return db.prepare("SELECT * FROM decisions ORDER BY id DESC LIMIT ?").all(limit);
+  return db.prepare("SELECT * FROM decisions WHERE stage NOT LIKE 'cal:%' ORDER BY id DESC LIMIT ?").all(limit);
 }
 
 export function recentTrades(limit = 100): unknown[] {
@@ -315,7 +370,7 @@ export function latestGovernor(): unknown {
 }
 
 export function latencyP50(): number {
-  const rows = db.prepare("SELECT latency_ms FROM decisions ORDER BY id DESC LIMIT 200").all() as { latency_ms: number }[];
+  const rows = db.prepare("SELECT latency_ms FROM decisions WHERE stage NOT LIKE 'cal:%' ORDER BY id DESC LIMIT 200").all() as { latency_ms: number }[];
   if (!rows.length) return 0;
   const s = [...rows].sort((a, b) => a.latency_ms - b.latency_ms);
   return s[Math.floor(s.length / 2)]?.latency_ms ?? 0;
@@ -359,7 +414,7 @@ export function contextFor(date: string): Map<string, { exclude: boolean; forbid
 }
 
 export function latencyP90(): number {
-  const rows = db.prepare("SELECT latency_ms FROM decisions ORDER BY id DESC LIMIT 200").all() as { latency_ms: number }[];
+  const rows = db.prepare("SELECT latency_ms FROM decisions WHERE stage NOT LIKE 'cal:%' ORDER BY id DESC LIMIT 200").all() as { latency_ms: number }[];
   if (!rows.length) return 0;
   const s = [...rows].sort((a, b) => a.latency_ms - b.latency_ms);
   return s[Math.floor(s.length * 0.9)]?.latency_ms ?? 0;
@@ -367,7 +422,7 @@ export function latencyP90(): number {
 
 export function tokensToday(): number {
   const start = clock.now() - 20 * 3600_000;
-  const row = db.prepare("SELECT COALESCE(SUM(tokens),0) AS t FROM decisions WHERE ts > ?").get(start) as { t: number };
+  const row = db.prepare("SELECT COALESCE(SUM(tokens),0) AS t FROM decisions WHERE ts > ? AND stage NOT LIKE 'cal:%'").get(start) as { t: number };
   return row.t;
 }
 

@@ -28,6 +28,12 @@ async function main(): Promise<void> {
   setInterval(() => {
     void engine.tick().catch((e) => console.error("tick", e));
   }, 2000);
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    process.on(sig, () => {
+      engine.shutdown();
+      process.exit(0);
+    });
+  }
 }
 
 void main();

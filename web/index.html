@@ -34,6 +34,7 @@
       <button type="submit">SET</button>
       <span id="capMsg" class="dim"></span>
     </form>
+    <button id="wild" title="stage-1 conviction entries, several names per cycle, no re-entry cooldown">WILD</button>
     <button class="kill" id="kill">KILL</button>
     <button class="ghost" id="unkill" title="clear kill switch">RESUME</button>
   </header>
@@ -51,7 +52,12 @@
   <div id="regime" class="strip mono"></div>
 
   <section id="sessions" class="panel sessions mono" data-title="SESSIONS" hidden>
-    <div class="dim" style="margin-bottom:8px">Days with 1-min bars in the live DB. Replay runs the real decision loop with simulated fills on its own port; the live engine is untouched.</div>
+    <div class="dim" style="font-size:10.5px;letter-spacing:.1em;margin-bottom:4px">LIVE SESSIONS · one row per RESUME → KILL / halt / close</div>
+    <table id="liveSess" style="margin-bottom:14px">
+      <thead><tr><th>#</th><th>DATE</th><th>START</th><th>END</th><th>DUR</th><th>DECISIONS</th><th>TRADES</th><th>PNL</th><th>ENDED BY</th><th>NOTE</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="dim" style="font-size:10.5px;letter-spacing:.1em;margin-bottom:4px">REPLAYABLE DAYS · bars in the live DB; replay runs the real loop with simulated fills on its own port</div>
     <div id="runningReplays"></div>
     <table id="sessTable">
       <thead><tr><th>DATE</th><th>BARS</th><th>SYMBOLS</th><th>LIVE TRADES</th><th>LIVE PNL</th><th>SPEED</th><th></th></tr></thead>

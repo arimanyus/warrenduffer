@@ -4,6 +4,7 @@
  *   pnpm calibrate                 # every 10th bar, ~1 hour with Jev
  *   pnpm calibrate -- --step 20    # faster, fewer samples
  *   pnpm calibrate -- --days 10
+ *   pnpm calibrate -- --nofetch     # DB bars only, no Kotak calls
  *
  * Runs stage 1 + stage 2 on a virtual clock (no look-ahead), labels each candidate by whether price
  * reached +1R before −1R in the next 30 minutes. Bars are stored in the live DB, which also serves as warm-up.
@@ -12,7 +13,7 @@
 import { KotakClient } from "../src/kotak/client.js";
 import { INDEX_TOKEN, NIFTY50 } from "../src/kotak/scrip.js";
 import { CandlesFeed } from "../src/data/feed.js";
-import { db } from "../src/db.js";
+import { db, setDecisionStagePrefix } from "../src/db.js";
 import { buildFeatures, buildIndexFeatures } from "../src/data/features.js";
 import { createModel } from "../src/model/index.js";
 import { runStage1, runStage2 } from "../src/strategy/continuation.js";
@@ -25,24 +26,47 @@ const STEP = Math.max(1, Number(args.step ?? 10));
 const DAYS = Math.min(29, Math.max(3, Number(args.days ?? 29)));
 
 async function main(): Promise<void> {
+  setDecisionStagePrefix("cal:");
   const client = new KotakClient();
   await client.login();
   await client.loadScrips();
   const to = istDateStr();
   const from = addDays(to, -DAYS);
+  const fromMs = Date.parse(`${from}T00:00:00+05:30`);
   const series = new Map<string, Bar[]>();
+  const selectBars = db.prepare("SELECT symbol, ts, open, high, low, close, volume FROM bars_1m WHERE symbol = ? AND ts >= ? ORDER BY ts");
+  let fetched = 0;
   for (const sym of [...NIFTY50, INDEX_TOKEN]) {
     const inst = client.getInstrument(sym);
     if (!inst) continue;
+    // Reuse what the DB already has (warm-up or a previous run); Kotak throttles repeated 30-day pulls hard.
+    const have = selectBars.all(sym, fromMs) as Bar[];
+    const lastTs = have.at(-1)?.ts ?? 0;
+    const stale = Date.now() - lastTs > 30 * 60_000;
+    if (have.length > 300 && !stale) {
+      series.set(sym, have);
+      process.stdout.write(`${sym} ${have.length}(db)  `);
+      continue;
+    }
+    if (args.nofetch) {
+      if (have.length) series.set(sym, have);
+      process.stdout.write(`${sym} ${have.length}(db,stale)  `);
+      continue;
+    }
     try {
-      const rows = await client.candles(inst.token, "nse_cm", from, to, "1min");
-      series.set(sym, rows.map((r) => ({ symbol: sym, ...r })));
-      process.stdout.write(`${sym} ${rows.length}  `);
+      const fetchFrom = have.length > 300 ? istDateStr(lastTs) : from;
+      const rows = await client.candles(inst.token, "nse_cm", fetchFrom, to, "1min");
+      fetched++;
+      const merged = new Map<number, Bar>(have.map((b) => [b.ts, b]));
+      for (const r of rows) merged.set(r.ts, { symbol: sym, ...r });
+      series.set(sym, [...merged.values()].sort((a, b) => a.ts - b.ts));
+      process.stdout.write(`${sym} ${series.get(sym)!.length}(+${rows.length})  `);
     } catch (e) {
-      console.error(`\n${sym} ${String(e)}`);
+      if (have.length) series.set(sym, have);
+      console.error(`\n${sym} fetch failed, using ${have.length} db bars: ${String(e).slice(0, 120)}`);
     }
   }
-  console.log();
+  console.log(`\n${fetched} symbols fetched from Kotak, rest from DB`);
 
   // Seeds all bars once (in a transaction). loadBars() filters by the virtual clock, so there is no look-ahead.
   db.transaction(() => new CandlesFeed(series))();
@@ -52,6 +76,9 @@ async function main(): Promise<void> {
   const buckets = new Map<string, { n: number; win: number }>();
   const niftyB: Record<string, { n: number; win: number }> = {};
   const scores: Record<string, { hi: number; lo: number; nHi: number; nLo: number }> = {};
+  const passing = { n: 0, win: 0 };
+  let errors = 0;
+  let s1Candidates = 0;
   const total = Math.floor((timeline.length - 110) / STEP);
   console.log(`bars ${timeline.length} model ${model.name} step ${STEP} → ~${total} evaluations`);
 
@@ -69,20 +96,33 @@ async function main(): Promise<void> {
     if (feats.length < 5) continue;
     const above = feats.filter((f) => f.vwapDist.label === "above" || f.vwapDist.label === "far_above").length;
     const index = buildIndexFeatures(quotes.get(INDEX_TOKEN), 0, above / feats.length);
-    const s1 = await runStage1(model, feats, index);
-    if (!s1) continue;
+    const s1 = await runStage1(model, feats, index, { candlesOnly: true });
+    if (!s1) {
+      errors++;
+      continue;
+    }
     bump(niftyB, "long-" + bucket(s1.niftyLong), continued(series.get(INDEX_TOKEN), t, 1));
     bump(niftyB, "short-" + bucket(s1.niftyShort), continued(series.get(INDEX_TOKEN), t, -1));
+    s1Candidates += s1.longs.length + s1.shorts.length;
     for (const r of [...s1.longs, ...s1.shorts].slice(0, 4)) {
       const f = feats.find((x) => x.symbol === r.symbol);
       if (!f) continue;
-      const c = await runStage2(model, f, index, r.side);
-      if (!c) continue;
+      const c = await runStage2(model, f, index, r.side, { candlesOnly: true });
+      if (!c) {
+        errors++;
+        continue;
+      }
       const win = continued(series.get(c.symbol), t, c.side === "long" ? 1 : -1, f.last, f.atr1m);
-      const b = buckets.get(bucket(c.setupProb)) ?? { n: 0, win: 0 };
+      // Bucket by the probability Jev gave the *wanted* side, whether or not it was the chosen class.
+      const pWanted = c.setup === (c.side === "long" ? "long_continuation" : "short_continuation") ? c.setupProb : 1 - c.setupProb;
+      const b = buckets.get(bucket(pWanted)) ?? { n: 0, win: 0 };
       b.n++;
       if (win) b.win++;
-      buckets.set(bucket(c.setupProb), b);
+      buckets.set(bucket(pWanted), b);
+      if (c.passes) {
+        passing.n++;
+        if (win) passing.win++;
+      }
       for (const [sk, sv] of Object.entries(c.scores)) {
         const rec = scores[sk] ?? { hi: 0, lo: 0, nHi: 0, nLo: 0 };
         if (sv >= 0.66) {
@@ -97,9 +137,10 @@ async function main(): Promise<void> {
     }
     if (++done % 25 === 0) {
       const n = [...buckets.values()].reduce((s, b) => s + b.n, 0);
-      console.log(`${done}/${total} · ${istDateStr(t)} · ${n} candidates labelled`);
+      console.log(`${done}/${total} · ${istDateStr(t)} · stage1 picks ${s1Candidates} · labelled ${n} · would-trade ${passing.n} · jev errors ${errors}`);
     }
   }
+  console.log(`\njev errors: ${errors} (see decisions table, question='_error', for the messages)`);
 
   console.log("\n=== setup probability buckets (reached +1R before −1R within 30 min) ===");
   console.log("CAVEAT: candles only, no book/flow. Catches no-signal models, not weak-signal ones.");
@@ -116,6 +157,7 @@ async function main(): Promise<void> {
   } else {
     console.log("not enough buckets populated to judge");
   }
+  console.log(`\n=== candidates that would pass the live gates ===\n${passing.n} trades, ${passing.n ? ((passing.win / passing.n) * 100).toFixed(1) : "–"}% reached +1R first (breakeven ≈ 50% at 2R... but with no target, judge vs the bottom bucket)`);
   console.log("\n=== nifty noul buckets ===");
   for (const [k, v] of Object.entries(niftyB).sort()) console.log(k.padEnd(18), String(v.n).padStart(5), v.n ? ((v.win / v.n) * 100).toFixed(1) + "%" : "");
   console.log("\n=== score information (hit rate when score ≥0.66 vs below) ===");

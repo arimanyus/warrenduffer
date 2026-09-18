@@ -9,6 +9,7 @@ import {
   latencyP90,
   latestGovernor,
   latestRankings,
+  listSessions,
   recentDecisions,
   recentEvents,
   recentTrades,
@@ -36,14 +37,14 @@ export function startServer(engine: Engine, replay?: ReplayControl, port = cfg.p
     const url = new URL(req.url ?? "/", `http://${cfg.host}:${port}`);
     if (url.pathname === "/api/state") return json(res, state(engine));
     if (url.pathname === "/api/sessions" && manager) {
-      return json(res, { sessions: manager.sessions(), running: manager.list() });
+      return json(res, { live: listSessions(), sessions: manager.sessions(), running: manager.list() });
     }
     if (url.pathname === "/api/sessions/start" && req.method === "POST" && manager) {
       const m = manager;
       void readBody(req).then((raw) => {
         try {
-          const body = JSON.parse(raw) as { date: string; speed?: number };
-          json(res, { ok: true, replay: m.start(body.date, Number(body.speed ?? 60)) });
+          const body = JSON.parse(raw) as { date: string; speed?: number; wild?: boolean };
+          json(res, { ok: true, replay: m.start(body.date, Number(body.speed ?? 60), !!body.wild) });
         } catch (e) {
           res.writeHead(400);
           res.end(String(e));
@@ -83,6 +84,14 @@ export function startServer(engine: Engine, replay?: ReplayControl, port = cfg.p
     if (url.pathname === "/api/unkill" && req.method === "POST") {
       engine.unkill();
       return json(res, { ok: true });
+    }
+    if (url.pathname === "/api/wild" && req.method === "POST") {
+      void readBody(req).then((raw) => {
+        const body = JSON.parse(raw || "{}") as { on?: boolean };
+        engine.setWildMode(!!body.on);
+        json(res, { ok: true, wild: engine.wild });
+      });
+      return;
     }
     if (url.pathname === "/api/capital" && req.method === "POST") {
       void readBody(req).then((raw) => {

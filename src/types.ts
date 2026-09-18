@@ -157,6 +157,8 @@ export interface OpenPosition {
   exitCost: number;
   exitReason: string | null;
   mfeBps: number;
+  lastVerdict?: string;
+  exitVotes: number;
 }
 
 export interface WorkingOrder {

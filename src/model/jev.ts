@@ -38,22 +38,30 @@ export class JevModel implements Model {
     symbol: string | null = null,
   ): Promise<EvalResult> {
     const t0 = Date.now();
+    // Whole evaluate() must finish inside TIMEOUT_MS, including one retry on a transient gateway 5xx.
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
     try {
-      const raw = await this.call(state, questions, ac.signal);
+      let raw: unknown;
+      try {
+        raw = await this.call(state, questions, ac.signal);
+      } catch (e) {
+        if (!isTransient(e) || ac.signal.aborted || Date.now() - t0 > TIMEOUT_MS * 0.5) throw e;
+        raw = await this.call(state, questions, ac.signal);
+      }
       const latencyMs = Date.now() - t0;
       const parsed = normalize(raw);
       persist(parsed, stage, symbol, latencyMs);
       return { ...parsed, latencyMs, ok: true };
-    } catch {
+    } catch (e) {
       const latencyMs = Date.now() - t0;
+      const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
       insertDecision({
         ts: clock.now(),
         stage,
         symbol,
         question: "_error",
-        answer: "timeout_or_fail",
+        answer: msg.slice(0, 200),
         probability: null,
         confidence: null,
         latencyMs,
@@ -66,7 +74,9 @@ export class JevModel implements Model {
     }
   }
 
-  private async call(state: unknown, questions: Record<string, Question>, abortSignal: AbortSignal): Promise<unknown> {
+  private async call(rawState: unknown, questions: Record<string, Question>, abortSignal: AbortSignal): Promise<unknown> {
+    // The SDK rejects undefined/NaN/Infinity anywhere in state. A JSON round-trip drops undefined and nulls the rest.
+    const state: unknown = JSON.parse(JSON.stringify(rawState));
     if (cfg.aiGatewayKey) {
       return evaluate({
         model: "typesafe-ai/jev",
@@ -91,6 +101,11 @@ export class JevModel implements Model {
     }
     throw new Error("no Jev key");
   }
+}
+
+function isTransient(e: unknown): boolean {
+  const msg = e instanceof Error ? `${e.name} ${e.message}` : String(e);
+  return /InternalServerError|temporarily unavailable|502|503|504|ECONNRESET|overloaded|rate limit|429/i.test(msg);
 }
 
 function toSdkQuestions(questions: Record<string, Question>): Record<string, unknown> {

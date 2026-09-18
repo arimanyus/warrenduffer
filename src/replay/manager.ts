@@ -16,9 +16,12 @@ export interface RunningReplay {
   date: string;
   port: number;
   speed: number;
+  wild: boolean;
   startedAt: number;
+  ready: boolean;
   exited: boolean;
   exitCode: number | null;
+  lastLog: string;
 }
 
 const BASE_PORT = 8081;
@@ -53,7 +56,7 @@ export class ReplayManager {
     return [...this.running.values()].map((r) => r.info);
   }
 
-  start(date: string, speed: number): RunningReplay {
+  start(date: string, speed: number, wild = false): RunningReplay {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("bad date");
     const existing = this.running.get(date);
     if (existing && !existing.info.exited) return existing.info;
@@ -63,9 +66,16 @@ export class ReplayManager {
     const proc = spawn(
       process.execPath,
       [tsx, "scripts/replay.ts", "--date", date, "--speed", String(speed), "--port", String(port), "--source", cfg.dbPath],
-      { cwd: process.cwd(), env: { ...process.env }, stdio: ["ignore", "inherit", "inherit"] },
+      { cwd: process.cwd(), env: { ...process.env, REPLAY_WILD: wild ? "1" : "0" }, stdio: ["ignore", "pipe", "pipe"] },
     );
-    const info: RunningReplay = { date, port, speed, startedAt: Date.now(), exited: false, exitCode: null };
+    const info: RunningReplay = { date, port, speed, wild, startedAt: Date.now(), ready: false, exited: false, exitCode: null, lastLog: "starting" };
+    const onData = (buf: Buffer) => {
+      const line = buf.toString().trim().split("\n").pop() ?? "";
+      if (line) info.lastLog = line.slice(0, 160);
+      if (line.includes("http://")) info.ready = true;
+    };
+    proc.stdout?.on("data", onData);
+    proc.stderr?.on("data", onData);
     proc.on("exit", (code) => {
       info.exited = true;
       info.exitCode = code;

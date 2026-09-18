@@ -43,7 +43,7 @@ export const NIFTY50 = [
   "SHRIRAMFIN",
   "SUNPHARMA",
   "TATACONSUM",
-  "TATAMOTORS",
+  "TMPV",
   "TATASTEEL",
   "TCS",
   "TECHM",

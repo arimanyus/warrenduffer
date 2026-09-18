@@ -64,8 +64,10 @@ function render(s) {
   renderReplay(s.replay);
   const observe = s.mode === "observe";
   const replay = s.mode === "replay";
-  $("mode").textContent = replay ? "REPLAY · sim fills" : observe ? "OBSERVE · no orders" : `LIVE · opt ${s.optionsMode}`;
+  $("mode").textContent = replay ? "REPLAY · sim fills" : observe ? "OBSERVE · no orders" : `LIVE${s.wild ? " · WILD" : ""} · opt ${s.optionsMode}`;
   $("mode").className = `pill ${replay || observe ? "a" : "r"}`;
+  $("wild").classList.toggle("on", !!s.wild);
+  $("wild").textContent = s.wild ? "WILD ON" : "WILD";
   $("model").textContent = s.model;
   $("model").className = `pill ${s.model === "jev" ? "g" : "a"}`;
   $("session").textContent = replay ? "sim broker" : s.session ? "kotak ok" : "no session";
@@ -73,7 +75,7 @@ function render(s) {
   $("warm").textContent = s.warmedUp ? `hist ok · ${s.universeSize} names · ${s.quotesLive} quotes` : "no history";
   $("warm").className = `pill ${s.warmedUp ? "" : "a"}`;
   $("lat").textContent = `jev p50 ${s.latencyP50 || 0}ms · p90 ${s.latencyP90 || 0}ms`;
-  $("skip").textContent = `skipped ${s.skippedToday || 0}`;
+  $("skip").textContent = `${s.sessionId ? `session #${s.sessionId} · ` : ""}skipped ${s.skippedToday || 0}`;
   $("clock").textContent = ist(s.serverTime, true);
 
   if (!capFocused && s.capital != null) capInput.value = String(Math.round(s.capital));
@@ -122,7 +124,7 @@ function render(s) {
         (p) =>
           `<tr><td class="bright">${p.symbol}</td><td class="${p.side === "long" ? "g" : "r"}">${p.side}</td><td>${p.qty - (p.closedQty || 0)}</td>` +
           `<td>${n(p.entryPrice, 2)}</td><td>${n(p.ltp, 2)}</td><td>${n(p.stop, 2)}</td><td class="${p.hasStop ? "g" : "r"}">${p.hasStop ? "EXCH" : "ENGINE"}</td>` +
-          `<td>${n(p.notional)}</td><td class="${cls(p.unrealized)}">${signed(p.unrealized)}</td><td>${n(p.thesis, 2)}</td><td>${n(p.mfeBps)}bp</td><td>${n(p.holdMin, 1)}</td></tr>`,
+          `<td>${n(p.notional)}</td><td class="${cls(p.unrealized)}">${signed(p.unrealized)}</td><td title="${esc(p.lastVerdict || "")}">${n(p.thesis, 2)}${p.lastVerdict ? ` <span class="dim">${esc(p.lastVerdict.split(" · ")[0])}</span>` : ""}</td><td>${n(p.mfeBps)}bp</td><td>${n(p.holdMin, 1)}</td></tr>`,
       )
       .join("") || `<tr><td colspan="12" class="dim">no positions</td></tr>`;
 
@@ -227,6 +229,11 @@ $("kill").onclick = () => {
   if (prompt("type CONFIRM to cancel all entries and flatten") !== "CONFIRM") return;
   fetch("/api/kill", { method: "POST" });
 };
+$("wild").onclick = () => {
+  const on = !$("wild").classList.contains("on");
+  if (on && prompt("WILD: enter on stage-1 conviction alone, up to the position cap per cycle, no re-entry cooldown. Type WILD to enable.") !== "WILD") return;
+  fetch("/api/wild", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ on }) });
+};
 $("unkill").onclick = () => {
   if (prompt("type RESUME to clear the kill switch") !== "RESUME") return;
   fetch("/api/unkill", { method: "POST" });
@@ -263,6 +270,8 @@ $("tabs").onclick = (e) => {
   if (!live) loadSessions();
 };
 
+const pendingOpen = new Set();
+
 function loadSessions() {
   fetch("/api/sessions")
     .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
@@ -273,16 +282,40 @@ function loadSessions() {
 }
 
 function renderSessions(d) {
+  const live = d.live || [];
+  $("liveSess").querySelector("tbody").innerHTML =
+    live
+      .map((s) => {
+        const end = s.ended_at || Date.now();
+        const dur = Math.round((end - s.started_at) / 60000);
+        const date = new Date(s.started_at).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+        return (
+          `<tr><td class="dim">${s.id}</td><td>${date}</td><td>${ist(s.started_at)}</td><td>${s.ended_at ? ist(s.ended_at) : '<span class="g">live</span>'}</td>` +
+          `<td>${dur}m</td><td>${s.decisions}</td><td>${s.trades}</td><td class="${cls(s.pnl)}">${s.trades ? signed(s.pnl) : "–"}</td>` +
+          `<td>${s.end_reason || ""}</td><td class="dim">${esc(s.note || "")}</td>` +
+          `<td>${s.ended_at ? `<button data-replay="${date}" title="replay this day">REPLAY DAY</button>` : ""}</td></tr>`
+        );
+      })
+      .join("") || `<tr><td colspan="11" class="dim">no live sessions yet — RESUME starts one</td></tr>`;
   const running = d.running || [];
+  for (const r of running) {
+    // Open the replay tab once, only when its server is actually up.
+    if (r.ready && !r.exited && pendingOpen.has(r.date)) {
+      pendingOpen.delete(r.date);
+      window.open(`http://${location.hostname}:${r.port}/`, "_blank");
+    }
+  }
   $("runningReplays").innerHTML = running.length
     ? `<div class="running">` +
       running
         .map(
           (r) =>
-            `<div><span class="a">REPLAY</span> ${r.date} · ${r.speed === 0 ? "MAX" : r.speed + "×"} · ` +
+            `<div><span class="a">REPLAY</span> ${r.date} · ${r.speed === 0 ? "MAX" : r.speed + "×"}${r.wild ? " · WILD" : ""} · ` +
             (r.exited
-              ? `<span class="dim">exited (${r.exitCode ?? "?"})</span>`
-              : `<a href="http://${location.hostname}:${r.port}/" target="_blank">open :${r.port}</a>`) +
+              ? `<span class="dim">exited (${r.exitCode ?? "?"}) — ${esc(r.lastLog || "")}</span>`
+              : r.ready
+                ? `<a href="http://${location.hostname}:${r.port}/" target="_blank">open :${r.port}</a>`
+                : `<span class="dim">starting… ${esc(r.lastLog || "")}</span>`) +
             ` <button data-stop="${r.date}">${r.exited ? "CLEAR" : "STOP"}</button></div>`,
         )
         .join("") +
@@ -305,13 +338,20 @@ $("sessions").onclick = (e) => {
   const play = e.target.closest("button[data-replay]");
   if (play) {
     const date = play.dataset.replay;
-    const speed = Number($("sessions").querySelector(`select[data-speed-for="${date}"]`).value);
+    const sel = $("sessions").querySelector(`select[data-speed-for="${date}"]`);
+    const speed = sel ? Number(sel.value) : 60;
+    const wild = $("wild").classList.contains("on");
     play.disabled = true;
-    fetch("/api/sessions/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date, speed }) })
+    pendingOpen.add(date);
+    fetch("/api/sessions/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date, speed, wild }) })
       .then((r) => r.json())
-      .then((j) => {
-        if (j.replay) setTimeout(() => window.open(`http://${location.hostname}:${j.replay.port}/`, "_blank"), 2500);
+      .then(() => {
         loadSessions();
+        const poll = setInterval(() => {
+          if (!pendingOpen.has(date)) return clearInterval(poll);
+          loadSessions();
+        }, 1000);
+        setTimeout(() => clearInterval(poll), 60000);
       });
     return;
   }

@@ -6,7 +6,7 @@ import { seedBars } from "./data/bars.js";
 import { barDayStart, buildFeatures, buildIndexFeatures, loadBars } from "./data/features.js";
 import { LiveFeed } from "./data/feed.js";
 import { buildUniverse } from "./data/universe.js";
-import { contextFor, db, getCapital, insertEvent, pruneSnapshots, todayPnl } from "./db.js";
+import { contextFor, db, getCapital, getWild, insertEvent, openSession, pruneSnapshots, refreshSession, setWild, todayPnl } from "./db.js";
 import { LiveExecutor } from "./executor/live.js";
 import type { Executor, Fill } from "./executor/types.js";
 import type { Broker } from "./broker.js";
@@ -47,6 +47,13 @@ export class Engine {
   taken: Candidate | null = null;
   lastSkipReason = "";
   warmedUp = false;
+  lastPositionCheck = 0;
+  wild = getWild();
+  sessionId: number | null = null;
+  lastSessionRefresh = 0;
+  lastIndex: IndexFeatures | null = null;
+  lastStage1: { longs: unknown[]; shorts: unknown[]; top: string } | null = null;
+  private managing = false;
   model: Model;
   exec: Executor;
   feed: LiveFeed;
@@ -102,33 +109,43 @@ export class Engine {
       insertEvent("context", String(e));
     }
     insertEvent("start", `${this.replay ? "replay" : "live"} model=${this.model.name} trade=${this.canTrade}`);
+    if (!existsSync(cfg.killPath) && this.canTrade) this.beginSession("start");
     if (!this.replay) pruneSnapshots(30 * 24 * 3600_000);
   }
 
   /** Load recent 1-min candles so RVOL, ADR and ATR have history from the first minute. */
   private async warmup(): Promise<void> {
-    const to = istDateStr();
-    const from = addDays(to, -cfg.warmupDays);
-    const have = db.prepare("SELECT COUNT(*) AS c FROM bars_1m WHERE symbol = ? AND ts < ?").get("Nifty 50", barDayStart()) as { c: number };
-    if (have.c > 2000 || this.replay) {
+    if (this.replay) {
+      const have = db.prepare("SELECT COUNT(*) AS c FROM bars_1m WHERE symbol = ? AND ts < ?").get("Nifty 50", barDayStart()) as { c: number };
       this.warmedUp = have.c > 300;
       return;
     }
+    const to = istDateStr();
     const symbols: string[] = [...NIFTY50, INDEX_TOKEN];
+    const lastBar = db.prepare("SELECT MAX(ts) AS t, COUNT(*) AS c FROM bars_1m WHERE symbol = ?");
     let loaded = 0;
+    let skipped = 0;
     for (const sym of symbols) {
       const inst = this.client.getInstrument(sym);
       if (!inst) continue;
+      const { t, c } = lastBar.get(sym) as { t: number | null; c: number };
+      const stale = !t || clock.now() - t > 10 * 60_000;
+      if (c > 2000 && !stale) {
+        skipped++;
+        continue;
+      }
+      // Full history if the symbol is new; otherwise just today's gap since the last stored bar.
+      const from = c > 2000 && t ? istDateStr(t) : addDays(to, -cfg.warmupDays);
       try {
         const rows = await this.client.candles(inst.token, "nse_cm", from, to, "1min");
         seedBars(sym, rows.map((r) => ({ symbol: sym, ...r })));
         loaded++;
       } catch (e) {
-        insertEvent("warmup_err", `${sym} ${e}`);
+        insertEvent("warmup_err", `${sym} ${String(e).slice(0, 120)}`);
       }
     }
-    this.warmedUp = loaded > 0;
-    insertEvent("warmup", `${loaded}/${symbols.length} symbols, ${cfg.warmupDays}d of 1m candles`);
+    this.warmedUp = loaded + skipped > 0;
+    insertEvent("warmup", `${loaded} symbols fetched, ${skipped} already current`);
   }
 
   rebuildUniverse(): void {
@@ -136,7 +153,8 @@ export class Engine {
       cash: this.client.allCash(),
       quotes: this.quotes,
       openSymbols: new Set(this.positions.keys()),
-      cooldownMs: 15 * 60_000,
+      // WILD grinds: a name can be re-entered as soon as it closes if Jev still rates it.
+      cooldownMs: this.wild ? 0 : 15 * 60_000,
     });
     this.lastUniverseRebuild = clock.now();
   }
@@ -153,6 +171,18 @@ export class Engine {
     } finally {
       this.fastBusy = false;
     }
+    // Hold / sell / breakeven on open positions: its own faster cadence, independent of entry scans.
+    const posMs = cfg.positionIntervalS * 1000;
+    if (!this.managing && this.positions.size && clock.now() - this.lastPositionCheck >= posMs) {
+      this.lastPositionCheck = clock.now();
+      this.managing = true;
+      const run = this.managePositions()
+        .catch((e) => insertEvent("manage_err", String(e)))
+        .finally(() => {
+          this.managing = false;
+        });
+      if (awaitDecision) await run;
+    }
     const intervalMs = cfg.decisionIntervalS * 1000;
     if (!this.deciding && clock.now() - this.lastDecision >= intervalMs) {
       this.lastDecision = clock.now();
@@ -166,11 +196,38 @@ export class Engine {
         .finally(() => {
           this.deciding = false;
           if (Date.now() - t0 > 10_000 && !this.replay) {
-            insertEvent("skip", "decision >10s");
+            insertEvent("skip", `decision took ${((Date.now() - t0) / 1000).toFixed(1)}s`);
             this.skipped++;
           }
         });
       if (awaitDecision) await run;
+    }
+  }
+
+  /** One Jev call per open position: thesis, exit_now, extended, take_profit → exit / breakeven / hold. */
+  private async managePositions(): Promise<void> {
+    if (this.killed || !this.client.session) return;
+    const index = this.lastIndex;
+    for (const pos of [...this.positions.values()]) {
+      if (pos.closedQty >= pos.qty) continue;
+      const q = this.quotes.get(pos.symbol);
+      const f = q ? buildFeatures(pos.symbol, q) : null;
+      if (!q || !f) continue;
+      const u = unrealized(pos, q);
+      const d = await managePosition(this.model, pos, f, index, u);
+      pos.thesis = d.thesis;
+      db.prepare("UPDATE positions SET thesis=? WHERE id=?").run(d.thesis, pos.id);
+      const wantsOut = d.action === "exit" || d.action === "take_profit";
+      // At a 5 s cadence one noisy answer must not close a trade: two consecutive exit votes (~10 s) are required.
+      // Time stops and hard stops bypass this; they are not Jev opinions.
+      pos.exitVotes = wantsOut ? pos.exitVotes + 1 : 0;
+      const confirmed = wantsOut && (pos.exitVotes >= cfg.exitConfirmVotes || d.reason === "time");
+      pos.lastVerdict = `${d.action}${wantsOut && !confirmed ? ` (${pos.exitVotes}/${cfg.exitConfirmVotes})` : ""} · thesis ${d.thesis.toFixed(1)} · exit ${d.exitNow.toFixed(2)} · tp ${d.takeProfit.toFixed(2)}`;
+      if (confirmed) {
+        await this.exitPosition(pos, d.reason);
+      } else if (d.action === "breakeven") {
+        await this.moveStopBreakeven(pos);
+      }
     }
   }
 
@@ -184,12 +241,21 @@ export class Engine {
       }
     }
     if (!this.client.session) return;
-    if (minutesOfDay() >= FLATTEN_MIN && (this.positions.size || this.exec.orders.size)) {
-      await this.exec.cancelAll("entry");
-      await this.flattenAll("flatten");
+    if (minutesOfDay() >= FLATTEN_MIN) {
+      if (this.positions.size || this.exec.orders.size) {
+        await this.exec.cancelAll("entry");
+        await this.flattenAll("flatten");
+      } else if (this.sessionId !== null && !this.replay) {
+        this.endSession("close");
+      }
+    }
+    if (this.sessionId !== null && clock.now() - this.lastSessionRefresh > 30_000) {
+      this.lastSessionRefresh = clock.now();
+      refreshSession(this.sessionId, this.regime, null);
     }
     if (todayPnl() <= -cfg.dailyLossCap && !this.halted) {
       this.halted = true;
+      this.endSession("halt");
       await alert("halt", `daily loss cap ${todayPnl().toFixed(0)}`);
       await this.exec.cancelAll("entry");
       await this.flattenAll("halt");
@@ -222,18 +288,20 @@ export class Engine {
     if (this.killed || this.halted || !this.client.session) return;
     if (!this.universe.length) return;
     const feats: SymbolFeatures[] = [];
+    const missing: string[] = [];
     for (const u of this.universe) {
       const q = this.quotes.get(u.symbol);
-      if (!q) continue;
-      const f = buildFeatures(u.symbol, q);
+      const f = q ? buildFeatures(u.symbol, q) : null;
       if (f) feats.push(f);
+      else missing.push(`${u.symbol}${q ? "(no features)" : "(no quote)"}`);
     }
+    if (missing.length) this.lastSkipReason = `${missing.length} names without data: ${missing.slice(0, 6).join(", ")}`;
     if (!feats.length) return;
     const niftyQ = this.quotes.get(INDEX_TOKEN);
     const above = feats.filter((f) => f.vwapDist.label === "above" || f.vwapDist.label === "far_above").length;
     const breadth = feats.length ? above / feats.length : 0.5;
     const index: IndexFeatures | null = buildIndexFeatures(niftyQ, 0, breadth);
-    const s1 = await runStage1(this.model, feats, index);
+    const s1 = await runStage1(this.model, feats, index, { candlesOnly: this.replay });
     if (!s1) {
       this.skipped++;
       this.lastSkipReason = "stage1 failed";
@@ -244,21 +312,8 @@ export class Engine {
     this.riskOff = s1.riskOff;
     this.niftyLong = s1.niftyLong;
     this.niftyShort = s1.niftyShort;
-
-    for (const pos of [...this.positions.values()]) {
-      const q = this.quotes.get(pos.symbol);
-      const f = q ? buildFeatures(pos.symbol, q) : null;
-      if (!q || !f) continue;
-      const u = unrealized(pos, q);
-      const d = await managePosition(this.model, pos, f, index, u);
-      pos.thesis = d.thesis;
-      db.prepare("UPDATE positions SET thesis=? WHERE id=?").run(d.thesis, pos.id);
-      if (d.action === "exit" || d.action === "take_profit") {
-        await this.exitPosition(pos, d.reason);
-      } else if (d.action === "breakeven") {
-        await this.moveStopBreakeven(pos);
-      }
-    }
+    this.lastIndex = index;
+    this.lastStage1 = { longs: s1.longs, shorts: s1.shorts, top: s1.bestP.toFixed(2) };
 
     const inWindow = minutesOfDay() >= ENTRY_START_MIN && minutesOfDay() <= ENTRY_END_MIN;
     if (!inWindow) {
@@ -272,22 +327,73 @@ export class Engine {
 
     const featMap = new Map(feats.map((f) => [f.symbol, f]));
     const cands: Candidate[] = [];
+    const filtered: string[] = [];
     const ctx = contextFor(istDateStr());
     for (const r of [...s1.longs, ...s1.shorts]) {
       const f = featMap.get(r.symbol);
       if (!f) continue;
-      if (f.spreadBps > risk.maxSpreadBps || f.volume.rvol20d < risk.minRvol) continue;
-      if (ctx.get(r.symbol)?.forbidSide === r.side) continue;
-      const c = await runStage2(this.model, f, index, r.side);
+      if (f.spreadBps > risk.maxSpreadBps) {
+        filtered.push(`${r.symbol} spread ${f.spreadBps.toFixed(1)}bps`);
+        continue;
+      }
+      if (f.volume.rvol20d < risk.minRvol) {
+        filtered.push(`${r.symbol} rvol ${f.volume.rvol20d.toFixed(2)}`);
+        continue;
+      }
+      if (ctx.get(r.symbol)?.forbidSide === r.side) {
+        filtered.push(`${r.symbol} news`);
+        continue;
+      }
+      if (this.wild) {
+        // WILD: stage-1 conviction is the whole decision. No stage 2; size by p; several names per cycle.
+        if (r.p < risk.wildMinProb) {
+          filtered.push(`${r.symbol} p ${r.p.toFixed(2)} < ${risk.wildMinProb}`);
+          continue;
+        }
+        cands.push({
+          symbol: r.symbol,
+          side: r.side,
+          setup: r.side === "long" ? "long_continuation" : "short_continuation",
+          setupProb: r.p,
+          setupConf: 1,
+          entryScore: r.p,
+          scores: {},
+          oneSided: 1,
+          tier: r.p >= risk.wildTierA ? "A" : "B",
+          passes: true,
+          reject: "",
+        });
+        continue;
+      }
+      const c = await runStage2(this.model, f, index, r.side, { candlesOnly: this.replay });
       if (c) cands.push(c);
     }
     this.lastCandidates = cands;
+    if (this.wild) {
+      const room = cfg.maxPositions - this.positions.size - [...this.exec.orders.values()].filter((o) => o.kind === "entry").length;
+      const picks = cands
+        .filter((c) => !this.positions.has(c.symbol) && !this.hasOpenEntry(c.symbol))
+        .sort((a, b) => b.entryScore - a.entryScore)
+        .slice(0, Math.max(0, room));
+      this.taken = picks[0] ?? null;
+      for (const c of picks) await this.enterEquity(c, featMap.get(c.symbol)!);
+      if (!picks.length) {
+        this.lastSkipReason = room <= 0 ? "at position cap" : filtered.length ? `wild: ${filtered.join(", ")}` : `wild: no name ≥ ${risk.wildMinProb} (best ${s1.bestP.toFixed(2)})`;
+      } else {
+        this.lastSkipReason = "";
+      }
+      return;
+    }
     const best = pickBest(cands);
     this.taken = best;
     if (best && !this.positions.has(best.symbol) && !this.hasOpenEntry(best.symbol)) {
       await this.enterEquity(best, featMap.get(best.symbol)!);
     } else if (!best) {
-      this.lastSkipReason = `${s1.longs.length + s1.shorts.length} stage1, 0 passed stage2`;
+      this.lastSkipReason = cands.length
+        ? `stage2 rejected: ${cands.map((c) => `${c.symbol} ${c.reject}`).join(", ")}`
+        : filtered.length
+          ? `pre-filter: ${filtered.join(", ")}`
+          : `no name ≥ ${risk.stage1MinProb} in stage1 (best ${s1.bestP.toFixed(2)})`;
     }
 
     if (cfg.optionsMode === "on") {
@@ -465,6 +571,7 @@ export class Engine {
         exitCost: 0,
         exitReason: null,
         mfeBps: 0,
+        exitVotes: 0,
       };
       this.positions.set(pos.symbol, pos);
       await this.placeStop(pos);
@@ -717,6 +824,7 @@ export class Engine {
     if (existsSync(cfg.killPath) && !this.killed) {
       this.killed = true;
       void alert("kill", "kill switch");
+      this.endSession("kill");
       void this.exec.cancelAll("entry").then(() => this.flattenAll("kill"));
     }
   }
@@ -730,6 +838,32 @@ export class Engine {
     if (existsSync(cfg.killPath)) unlinkSync(cfg.killPath);
     this.killed = false;
     insertEvent("kill", "kill switch cleared");
+    this.beginSession("resume");
+  }
+
+  /** Sessions: one row per RESUME → KILL / halt / 15:10 flatten / shutdown span. */
+  private beginSession(note: string): void {
+    if (this.sessionId !== null || this.replay || !this.client.session) return;
+    this.sessionId = openSession(`${note} · ${this.wild ? "WILD" : "2-stage"} · ${this.model.name} · cap ${getCapital()} · qty ${cfg.liveQty || "auto"}`);
+    insertEvent("session", `#${this.sessionId} started (${note})`);
+  }
+
+  private endSession(reason: string): void {
+    if (this.sessionId === null) return;
+    refreshSession(this.sessionId, this.regime, reason);
+    insertEvent("session", `#${this.sessionId} ended (${reason})`);
+    this.sessionId = null;
+  }
+
+  setWildMode(on: boolean): void {
+    this.wild = on;
+    setWild(on);
+    this.rebuildUniverse();
+  }
+
+  /** Called from main on SIGINT/SIGTERM so the open session is closed with a reason. */
+  shutdown(): void {
+    this.endSession("shutdown");
   }
 
   /** Adopt live Kotak positions, place a missing SL-L for each, cancel unknown open entries. */
@@ -801,6 +935,7 @@ export class Engine {
           exitCost: 0,
           exitReason: null,
           mfeBps: 0,
+        exitVotes: 0,
         };
         this.positions.set(p.symbol, adopted);
         const existingStop = ords.find((o) => o.symbol === p.symbol && o.tag.startsWith("sl-") && o.status.toLowerCase().includes("pending"));
@@ -845,6 +980,8 @@ export class Engine {
       niftyShort: this.niftyShort,
       skipped: this.skipped,
       lastSkipReason: this.lastSkipReason,
+      sessionId: this.sessionId,
+      wild: this.wild,
       universeSize: this.universe.length,
       quotesLive: this.quotes.size,
       capital,

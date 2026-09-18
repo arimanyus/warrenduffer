@@ -513,7 +513,7 @@ export class KotakClient {
     url: string,
     init: { headers: Record<string, string>; body?: string },
   ): Promise<unknown> {
-    const res = await fetch(url, { method, headers: init.headers, body: init.body });
+    const res = await fetch(url, { method, headers: init.headers, body: init.body, signal: AbortSignal.timeout(20_000) });
     const text = await res.text();
     let json: unknown = text;
     try {
