@@ -6,17 +6,7 @@ Single Node process: broker REST client (Kotak Neo or Zerodha Kite), Jev (TypeSa
 
 ## Architecture
 
-```
-.env -> config -> createBroker() -> KotakClient | ZerodhaClient      (src/broker.ts: Broker interface)
-                         |
-main.ts -> Engine (src/engine.ts), 2 s fast loop: quotes, fills, stops, 15:10 flatten, kill
-             |- LiveFeed (src/data)        -> bars_1m, snapshots (SQLite, data/harness.db)
-             |- Jev (src/model)            -> stage 1 rank -> stage 2 confirm -> hold/exit
-             |- risk + governor            -> size, stop, loss halt
-             '- LiveExecutor               -> broker place/modify/cancel/orders
-server.ts + web/  -> dashboard 127.0.0.1:8080
-scripts/replay.ts -> SimBroker + SimExecutor on a virtual clock (src/replay)
-```
+<img width="1536" height="1024" alt="ChatGPT Image Sep 23, 2026, 10_26_07 AM" src="https://github.com/user-attachments/assets/bb3b0491-517b-4abc-a0da-0c70baa6c77c" />
 
 `src/kotak` and `src/zerodha` are the broker clients. `src/data` is quotes, bars, and the universe. `src/model` is Jev. `src/strategy` is rank, exits, and the governor. `src/executor` places and polls orders. `src/replay` is the virtual-clock sim. `src/{broker,config,costs,symbols,limiter,risk,db,server}.ts` is the shared core. `web/` is the dashboard. `scripts/` is probe, calibrate, replay, report, gates, smoke, and the Zerodha login step. `risk.json` holds model thresholds and exit tuning.
 
