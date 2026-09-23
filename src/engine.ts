@@ -1,6 +1,6 @@
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { alert } from "./alerts.js";
-import { cfg, ENTRY_END_MIN, ENTRY_START_MIN, FLATTEN_MIN, risk } from "./config.js";
+import { brokerConfigured, cfg, ENTRY_END_MIN, ENTRY_START_MIN, FLATTEN_MIN, risk } from "./config.js";
 import { runDailyContext } from "./context.js";
 import { seedBars } from "./data/bars.js";
 import { barDayStart, buildFeatures, buildIndexFeatures, loadBars } from "./data/features.js";
@@ -10,8 +10,8 @@ import { contextFor, db, getCapital, getWild, insertEvent, openSession, pruneSna
 import { LiveExecutor } from "./executor/live.js";
 import type { Executor, Fill } from "./executor/types.js";
 import type { Broker } from "./broker.js";
-import { fillCost } from "./kotak/costs.js";
-import { INDEX_SYMBOL, INDEX_TOKEN, NIFTY50 } from "./kotak/scrip.js";
+import { fillCost } from "./costs.js";
+import { INDEX_SYMBOL, INDEX_TOKEN, NIFTY50 } from "./symbols.js";
 import { createModel, type Model } from "./model/index.js";
 import { attributionQuestions } from "./model/questions.js";
 import { canEnterMore, positionNotional, riskPerTrade, roundTick, sizeQty, stopBps, stopPrice, targetPrice, unrealized } from "./risk.js";
@@ -245,7 +245,7 @@ export class Engine {
 
   private async fastLoop(): Promise<void> {
     this.checkKill();
-    if (this.client.session || cfg.kotakAccessToken) {
+    if (this.client.session || brokerConfigured()) {
       try {
         this.quotes = await this.feed.tick();
       } catch (e) {
@@ -274,7 +274,7 @@ export class Engine {
     }
     if (!this.replay && Date.now() - this.client.lastOk > 30_000 && this.positions.size && Date.now() - this.lastConnAlert > 60_000) {
       this.lastConnAlert = Date.now();
-      await alert("connectivity", "no kotak response >30s with open position");
+      await alert("connectivity", `no ${cfg.broker} response >30s with open position`);
     }
     try {
       await this.exec.tick(this.quotes);
@@ -595,7 +595,7 @@ export class Engine {
     }
     const pos = this.positions.get(o.symbol);
     if (!pos) {
-      await alert("orphan_fill", `${o.kind} fill for ${o.symbol} with no tracked position; check Kotak positions`);
+      await alert("orphan_fill", `${o.kind} fill for ${o.symbol} with no tracked position; check broker positions`);
       return;
     }
     pos.closedQty += f.qty;
@@ -625,7 +625,7 @@ export class Engine {
         symbol: pos.symbol,
         token: pos.token,
         segment: pos.segment,
-        tradingSymbol: inst?.tradingSymbol ?? `${pos.symbol}-EQ`,
+        tradingSymbol: inst?.tradingSymbol ?? pos.symbol,
         side: stopSide,
         qty: pos.qty - pos.closedQty,
         price: roundTick(pos.side === "long" ? pos.stop - 3 * tick : pos.stop + 3 * tick, tick),
@@ -682,7 +682,7 @@ export class Engine {
         symbol: pos.symbol,
         token: pos.token,
         segment: pos.segment,
-        tradingSymbol: inst?.tradingSymbol ?? `${pos.symbol}-EQ`,
+        tradingSymbol: inst?.tradingSymbol ?? pos.symbol,
         side,
         qty: pos.qty - pos.closedQty,
         price: px,
@@ -890,7 +890,7 @@ export class Engine {
     this.endSession("shutdown");
   }
 
-  /** Adopt live Kotak positions, place a missing SL-L for each, cancel unknown open entries. */
+  /** Adopt live broker positions, place a missing SL-L for each, cancel unknown open entries. */
   async reconcile(): Promise<void> {
     try {
       const pos = await this.client.positions();
@@ -916,7 +916,7 @@ export class Engine {
         if (cfg.onRestart === "flatten") {
           await this.client.place({
             segment: p.segment,
-            tradingSymbol: `${p.symbol}-EQ`,
+            tradingSymbol: this.client.getInstrument(p.symbol)?.tradingSymbol ?? p.symbol,
             token: p.token,
             side: side === "long" ? "sell" : "buy",
             qty: Math.abs(p.qty),
@@ -994,6 +994,7 @@ export class Engine {
       mode: this.replay ? "replay" : this.canTrade ? "live" : "observe",
       optionsMode: cfg.optionsMode,
       model: this.model.name,
+      broker: cfg.broker,
       session: !!this.client.session,
       warmedUp: this.warmedUp,
       halted: this.halted,

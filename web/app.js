@@ -89,7 +89,7 @@ function render(s) {
   $("jev").textContent = s.jevPaused ? "JEV PAUSED" : "PAUSE JEV";
   $("model").textContent = s.model;
   $("model").className = `pill ${s.model === "jev" ? "g" : "a"}`;
-  $("session").textContent = replay ? "sim broker" : s.session ? "kotak ok" : "no session";
+  $("session").textContent = replay ? "sim broker" : s.session ? `${s.broker} ok` : "no session";
   $("session").className = `pill ${s.session ? "g" : "r"}`;
   $("warm").textContent = s.warmedUp ? `hist ok · ${s.universeSize} names · ${s.quotesLive} quotes` : "no history";
   $("warm").className = `pill ${s.warmedUp ? "" : "a"}`;

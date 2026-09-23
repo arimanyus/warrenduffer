@@ -67,6 +67,7 @@ void main()
     console.error(e);
     process.exitCode = 1;
   })
-  .finally(() => {
+  .finally(async () => {
+    (await import("../src/db.js")).db.close();
     for (const suffix of ["", "-wal", "-shm"]) rmSync(scratch + suffix, { force: true });
   });

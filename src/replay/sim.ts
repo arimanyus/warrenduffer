@@ -1,11 +1,10 @@
-import type { Broker } from "../broker.js";
+import type { Broker, BrokerOrder, BrokerPosition, MarginCheck, PlaceResult, Session } from "../broker.js";
 import { risk } from "../config.js";
 import { barTs } from "../data/bars.js";
 import { db, insertEvent } from "../db.js";
 import type { Executor, Fill, PlaceIntent } from "../executor/types.js";
-import type { BrokerOrder, BrokerPosition, MarginCheck, PlaceResult, Session } from "../kotak/client.js";
-import { fillCost } from "../kotak/costs.js";
-import { INDEX_TOKEN, NIFTY50 } from "../kotak/scrip.js";
+import { fillCost } from "../costs.js";
+import { INDEX_TOKEN, NIFTY50 } from "../symbols.js";
 import { clock } from "../time.js";
 import type { Bar, Instrument, OptionContract, Quote, WorkingOrder } from "../types.js";
 

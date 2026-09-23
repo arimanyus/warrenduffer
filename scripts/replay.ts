@@ -4,7 +4,7 @@
  *   pnpm replay -- --date 2026-09-15 [--speed 60] [--port 8081] [--source data/harness.db]
  *
  * speed: virtual minutes per real minute. 1 = real time, 60 = one bar per second, 0 = as fast as Jev answers.
- * Bars come from the live DB (warmup history) or, if missing, from Kotak 1-min candles.
+ * Bars come from the live DB (warmup history) or, if missing, from broker 1-min candles.
  * Fills are simulated on bars (pessimistic). Writes to data/replay-<date>.db, never the live DB.
  */
 import Database from "better-sqlite3";
@@ -39,7 +39,7 @@ async function main(): Promise<void> {
   const { SimBroker, SimExecutor } = await import("../src/replay/sim.js");
   const { ReplayControl } = await import("../src/replay/control.js");
   const { startServer } = await import("../src/server.js");
-  const { INDEX_TOKEN, NIFTY50 } = await import("../src/kotak/scrip.js");
+  const { INDEX_TOKEN, NIFTY50 } = await import("../src/symbols.js");
   const { addDays } = await import("../src/time.js");
   const { barTs } = await import("../src/data/bars.js");
   type Bar = import("../src/types.js").Bar;
@@ -61,14 +61,14 @@ async function main(): Promise<void> {
   }
   dayCount = (db.prepare("SELECT COUNT(*) AS c FROM bars_1m WHERE ts >= ? AND ts < ?").get(dayStart, dayEnd) as { c: number }).c;
   if (dayCount < 100) {
-    const { cfg } = await import("../src/config.js");
-    if (!cfg.kotakAccessToken) {
-      console.error(`no bars for ${date} in ${source} and no KOTAK_* creds to fetch them. Run the live engine (warmup) first or set KOTAK_*.`);
+    const { brokerConfigured, cfg } = await import("../src/config.js");
+    if (!brokerConfigured()) {
+      console.error(`no bars for ${date} in ${source} and no ${cfg.broker} credentials to fetch them. Run the live engine (warmup) first or set the broker vars in .env.`);
       process.exit(1);
     }
-    const { KotakClient } = await import("../src/kotak/client.js");
+    const { createBroker } = await import("../src/broker.js");
     const { seedBars } = await import("../src/data/bars.js");
-    const client = new KotakClient();
+    const client = createBroker();
     await client.login();
     await client.loadScrips();
     const from = addDays(date, -cfg.warmupDays);

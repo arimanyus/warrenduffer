@@ -1,7 +1,12 @@
 {
   "name": "warren-duffer",
   "version": "0.1.0",
-  "private": true,
+  "description": "Intraday NSE trading harness: Jev ranks Nifty-50 names, code sizes and stops, orders go to Kotak Neo or Zerodha Kite.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arimanyus/warrenduffer.git"
+  },
   "type": "module",
   "scripts": {
     "start": "tsx src/main.ts",
@@ -12,6 +17,7 @@
     "smoke": "tsx scripts/smoke.ts",
     "probe": "tsx scripts/probe.ts",
     "replay": "tsx scripts/replay.ts",
+    "zerodha:login": "tsx scripts/zerodha-login.ts",
     "typecheck": "tsc --noEmit"
   },
   "engines": {

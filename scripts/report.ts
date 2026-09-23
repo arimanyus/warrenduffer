@@ -1,5 +1,5 @@
 import { allTrades, db } from "../src/db.js";
-import { equityRoundTripBps } from "../src/kotak/costs.js";
+import { equityRoundTripBps } from "../src/costs.js";
 
 function main(): void {
   const trades = allTrades();

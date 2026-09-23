@@ -4,7 +4,7 @@ import { cfg } from "./config.js";
 import { upsertContext } from "./db.js";
 import type { Model } from "./model/index.js";
 import { contextQuestions, riskEventQuestion } from "./model/questions.js";
-import { aliasMap } from "./kotak/scrip.js";
+import { aliasMap } from "./symbols.js";
 import type { Instrument } from "./types.js";
 import { istDateStr } from "./time.js";
 

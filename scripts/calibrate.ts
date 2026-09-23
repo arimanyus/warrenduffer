@@ -4,14 +4,14 @@
  *   pnpm calibrate                 # every 10th bar, ~1 hour with Jev
  *   pnpm calibrate -- --step 20    # faster, fewer samples
  *   pnpm calibrate -- --days 10
- *   pnpm calibrate -- --nofetch     # DB bars only, no Kotak calls
+ *   pnpm calibrate -- --nofetch     # DB bars only, no broker calls
  *
  * Runs stage 1 + stage 2 on a virtual clock (no look-ahead), labels each candidate by whether price
  * reached +1R before −1R in the next 30 minutes. Bars are stored in the live DB, which also serves as warm-up.
  * Caveat: candles carry no book or flow, so this catches a model with no signal, not one with weak signal.
  */
-import { KotakClient } from "../src/kotak/client.js";
-import { INDEX_TOKEN, NIFTY50 } from "../src/kotak/scrip.js";
+import { createBroker } from "../src/broker.js";
+import { INDEX_TOKEN, NIFTY50 } from "../src/symbols.js";
 import { CandlesFeed } from "../src/data/feed.js";
 import { db, setDecisionStagePrefix } from "../src/db.js";
 import { buildFeatures, buildIndexFeatures } from "../src/data/features.js";
@@ -27,7 +27,7 @@ const DAYS = Math.min(29, Math.max(3, Number(args.days ?? 29)));
 
 async function main(): Promise<void> {
   setDecisionStagePrefix("cal:");
-  const client = new KotakClient();
+  const client = createBroker();
   await client.login();
   await client.loadScrips();
   const to = istDateStr();
@@ -66,7 +66,7 @@ async function main(): Promise<void> {
       console.error(`\n${sym} fetch failed, using ${have.length} db bars: ${String(e).slice(0, 120)}`);
     }
   }
-  console.log(`\n${fetched} symbols fetched from Kotak, rest from DB`);
+  console.log(`\n${fetched} symbols fetched from broker, rest from DB`);
 
   // Seeds all bars once (in a transaction). loadBars() filters by the virtual clock, so there is no look-ahead.
   db.transaction(() => new CandlesFeed(series))();

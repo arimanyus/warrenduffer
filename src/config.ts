@@ -7,6 +7,7 @@ loadEnv();
 export type OptionsMode = "on" | "off";
 export type ModelName = "jev" | "mock";
 export type OnRestart = "adopt" | "flatten";
+export type BrokerName = "kotak" | "zerodha";
 
 export interface RiskWeights {
   trend_quality: number;
@@ -67,11 +68,16 @@ const riskPath = resolve(process.cwd(), "risk.json");
 export const risk: RiskConfig = JSON.parse(readFileSync(riskPath, "utf8")) as RiskConfig;
 
 export const cfg = {
+  broker: (str("BROKER", "kotak").toLowerCase() === "zerodha" ? "zerodha" : "kotak") as BrokerName,
   kotakAccessToken: str("KOTAK_ACCESS_TOKEN"),
   kotakMobile: str("KOTAK_MOBILE"),
   kotakUcc: str("KOTAK_UCC"),
   kotakMpin: str("KOTAK_MPIN"),
   kotakTotpSecret: str("KOTAK_TOTP_SECRET"),
+  zerodhaApiKey: str("ZERODHA_API_KEY"),
+  zerodhaApiSecret: str("ZERODHA_API_SECRET"),
+  zerodhaAccessToken: str("ZERODHA_ACCESS_TOKEN"),
+  zerodhaRequestToken: str("ZERODHA_REQUEST_TOKEN"),
   aiGatewayKey: str("AI_GATEWAY_API_KEY"),
   typesafeKey: str("TYPESAFE_AI_API_KEY"),
   model: (/jev/i.test(str("MODEL", "mock")) ? "jev" : "mock") as ModelName,
@@ -107,6 +113,12 @@ export const cfg = {
   warmupDays: num("WARMUP_DAYS", 25),
   maxRequotes: num("MAX_REQUOTES", 3),
 };
+
+/** Enough credentials for the selected broker to attempt a session. */
+export function brokerConfigured(): boolean {
+  if (cfg.broker === "zerodha") return !!cfg.zerodhaApiKey && (!!cfg.zerodhaAccessToken || (!!cfg.zerodhaRequestToken && !!cfg.zerodhaApiSecret));
+  return !!cfg.kotakAccessToken && !!cfg.kotakUcc;
+}
 
 function hhmm(name: string, fallback: string): number {
   const [h, m] = str(name, fallback).split(":").map(Number);

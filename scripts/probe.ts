@@ -1,10 +1,11 @@
 /**
- * Read-only Kotak probe. Logs in, then prints the raw shape of every endpoint the engine relies on,
- * so field names in src/kotak/client.ts can be verified against real payloads before any order is sent.
- * Places NO orders. The margin check is a query, not an order.
+ * Read-only broker probe (BROKER=kotak|zerodha). Logs in, prints the raw shape of every endpoint the engine relies on
+ * so the normalisers in src/kotak/ or src/zerodha/ can be checked before any order. Places NO orders.
+ * The margin check is a query, not an order.
  */
-import { KotakClient } from "../src/kotak/client.js";
-import { INDEX_TOKEN } from "../src/kotak/scrip.js";
+import { createBroker } from "../src/broker.js";
+import { cfg } from "../src/config.js";
+import { INDEX_TOKEN } from "../src/symbols.js";
 import { addDays, istDateStr } from "../src/time.js";
 
 function show(label: string, body: unknown, max = 1800): void {
@@ -14,28 +15,29 @@ function show(label: string, body: unknown, max = 1800): void {
 }
 
 async function main(): Promise<void> {
-  const client = new KotakClient();
+  const client = createBroker();
   client.onRaw = (ep, body) => {
     if (ep.includes("tradeApi")) show(`RAW ${ep} (keys only)`, Object.keys((body as Record<string, unknown>) ?? {}));
   };
   const sess = await client.login();
-  console.log("login ok, baseUrl", sess.baseUrl);
+  console.log(`${cfg.broker} login ok, baseUrl`, sess.baseUrl);
 
   await client.loadScrips();
   const rel = client.getInstrument("RELIANCE");
   show("scrip RELIANCE", rel);
   console.log("cash instruments parsed:", client.allCash().length, "fo:", client.foInstruments().length);
   if (!rel) {
-    console.log("RELIANCE not found: scrip master column mapping is wrong. See parseScripCsv in src/kotak/scrip.ts");
+    console.log(`RELIANCE not found: instrument parsing is wrong. See ${cfg.broker === "zerodha" ? "src/zerodha/instruments.ts" : "parseScripCsv in src/kotak/scrip.ts"}`);
+    process.exit(1);
   }
 
   client.onRaw = (ep, body) => show(`RAW ${ep}`, body);
-  const tokens = [{ token: rel?.token ?? "2885", segment: "nse_cm" }, { token: INDEX_TOKEN, segment: "nse_cm" }];
+  const tokens = [{ token: rel.token, segment: "nse_cm" }, { token: INDEX_TOKEN, segment: "nse_cm" }];
   const qs = await client.quotes(tokens);
   show("normalized quotes", qs);
 
   const to = istDateStr();
-  const rows = await client.candles(rel?.token ?? "2885", "nse_cm", addDays(to, -2), to, "1min");
+  const rows = await client.candles(rel.token, "nse_cm", addDays(to, -2), to, "1min");
   show("normalized candles (last 3)", rows.slice(-3));
   console.log("candles:", rows.length);
 
@@ -43,7 +45,7 @@ async function main(): Promise<void> {
   show("normalized positions", await client.positions());
   show("limits", await client.limits());
 
-  if (rel && qs[0]?.ltp) {
+  if (qs[0]?.ltp) {
     const m = await client.marginRequired({
       segment: "nse_cm",
       token: rel.token,

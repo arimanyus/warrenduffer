@@ -1,7 +1,7 @@
 import { risk } from "../config.js";
 import { db, insertEvent } from "../db.js";
 import { alert } from "../alerts.js";
-import { fillCost } from "../kotak/costs.js";
+import { fillCost } from "../costs.js";
 import type { Quote, WorkingOrder } from "../types.js";
 import type { Executor, Fill, PlaceIntent } from "./types.js";
 import { clock } from "../time.js";
@@ -97,7 +97,7 @@ export class LiveExecutor implements Executor {
     await this.client.modify({
       orderId: order.brokerId,
       segment: order.segment,
-      tradingSymbol: tradingSymbols.get(order.id) ?? `${order.symbol}-EQ`,
+      tradingSymbol: tradingSymbols.get(order.id) ?? order.symbol,
       token: order.token,
       side: order.side,
       qty: newQty,

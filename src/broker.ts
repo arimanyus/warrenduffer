@@ -1,7 +1,49 @@
-import type { BrokerOrder, BrokerPosition, MarginCheck, PlaceResult, Session } from "./kotak/client.js";
+import { cfg } from "./config.js";
+import { KotakClient } from "./kotak/client.js";
 import type { Instrument, OptionContract, Quote, Side } from "./types.js";
+import { ZerodhaClient } from "./zerodha/client.js";
 
-/** The subset of KotakClient the engine, feed and executor depend on. SimBroker implements it for replay. */
+export interface Session {
+  baseUrl: string;
+  auth: string;
+  sid: string;
+}
+
+export interface PlaceResult {
+  orderId: string | null;
+  raw: unknown;
+}
+
+export interface BrokerOrder {
+  orderId: string;
+  symbol: string;
+  status: string;
+  qty: number;
+  filledQty: number;
+  price: number;
+  trigger: number;
+  side: Side;
+  product: string;
+  tag: string;
+}
+
+export interface BrokerPosition {
+  symbol: string;
+  token: string;
+  segment: string;
+  qty: number;
+  avgPrice: number;
+  product: string;
+}
+
+export interface MarginCheck {
+  available: number;
+  required: number;
+  ok: boolean;
+  raw: unknown;
+}
+
+/** What the engine, feed and executor need from a broker. KotakClient and ZerodhaClient implement it; SimBroker implements it for replay. */
 export interface Broker {
   session: Session | null;
   lastOk: number;
@@ -49,4 +91,8 @@ export interface Broker {
   cancel(orderId: string): Promise<unknown>;
   orders(): Promise<BrokerOrder[]>;
   positions(): Promise<BrokerPosition[]>;
+}
+
+export function createBroker(onSessionLost?: () => void): KotakClient | ZerodhaClient {
+  return cfg.broker === "zerodha" ? new ZerodhaClient(onSessionLost) : new KotakClient(onSessionLost);
 }

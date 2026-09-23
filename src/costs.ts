@@ -1,4 +1,4 @@
-import type { Leg, Side } from "../types.js";
+import type { Leg, Side } from "./types.js";
 
 /** Statutory + estimated execution costs. Verified against contract notes in 1-share live. */
 export const EQUITY = {

@@ -1,8 +1,10 @@
 import { authenticator } from "otplib";
+import type { BrokerOrder, BrokerPosition, MarginCheck, PlaceResult, Session } from "../broker.js";
 import { cfg } from "../config.js";
+import { RateLimiter } from "../limiter.js";
+import { INDEX_TOKEN } from "../symbols.js";
 import type { Instrument, OptionContract, Quote, Side } from "../types.js";
-import { RateLimiter } from "./limiter.js";
-import { INDEX_TOKEN, parseScripCsv } from "./scrip.js";
+import { parseScripCsv } from "./scrip.js";
 
 const LOGIN = "https://mis.kotaksecurities.com/login/1.0/tradeApiLogin";
 const VALIDATE = "https://mis.kotaksecurities.com/login/1.0/tradeApiValidate";
@@ -16,46 +18,6 @@ export class KotakError extends Error {
   ) {
     super(message);
   }
-}
-
-export interface Session {
-  baseUrl: string;
-  auth: string;
-  sid: string;
-}
-
-export interface PlaceResult {
-  orderId: string | null;
-  raw: unknown;
-}
-
-export interface BrokerOrder {
-  orderId: string;
-  symbol: string;
-  status: string;
-  qty: number;
-  filledQty: number;
-  price: number;
-  trigger: number;
-  side: Side;
-  product: string;
-  tag: string;
-}
-
-export interface BrokerPosition {
-  symbol: string;
-  token: string;
-  segment: string;
-  qty: number;
-  avgPrice: number;
-  product: string;
-}
-
-export interface MarginCheck {
-  available: number;
-  required: number;
-  ok: boolean;
-  raw: unknown;
 }
 
 export class KotakClient {
