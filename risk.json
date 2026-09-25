@@ -39,5 +39,8 @@
   "optionDailyLossCap": 800,
   "eventExclude": 0.6,
   "newsMaterial": 1.5,
-  "newsBiasProb": 0.65
+  "newsBiasProb": 0.65,
+  "stopLimitBufferBps": 15,
+  "stopUnfilledMs": 3000,
+  "marketableBps": 25
 }
