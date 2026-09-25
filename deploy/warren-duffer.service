@@ -1,14 +1,40 @@
 [Unit]
 Description=Warren Duffer
-After=network.target
+Wants=network-online.target time-sync.target
+After=network-online.target time-sync.target
 
 [Service]
 Type=simple
+User=warren
+Group=warren
 WorkingDirectory=/opt/warren-duffer
-ExecStart=/usr/bin/pnpm start
+ExecStart=/opt/warren-duffer/node_modules/.bin/tsx src/main.ts
 Restart=always
 RestartSec=5
+# Session windows, flatten time, and bar timestamps are all IST.
+Environment=TZ=Asia/Kolkata
 Environment=NODE_ENV=production
+# Unit values win over .env. The kill file must live under a writable path or Kill fails.
+Environment=KILL_PATH=/opt/warren-duffer/data/kill.switch
+Environment=DB_PATH=/opt/warren-duffer/data/harness.db
+# Leaves room for the crash handler's kill + flatten attempt before SIGKILL.
+TimeoutStopSec=30
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# The DB and the kill-switch file are the only things the process writes.
+ReadWritePaths=/opt/warren-duffer/data
 
 [Install]
 WantedBy=multi-user.target

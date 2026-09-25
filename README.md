@@ -81,6 +81,7 @@ Runs the real decision loop over that day's 1-min bars on a virtual clock, with 
 | `pnpm smoke` | offline pipeline check, scratch DB |
 | `pnpm zerodha:login` | print the Kite login URL, or exchange a request token |
 | `pnpm typecheck` | `tsc --noEmit` |
+| `pnpm test` | unit + engine tests against a fake broker, temp DB, virtual clock |
 
 ## Configuration
 
@@ -114,7 +115,9 @@ Runs the real decision loop over that day's 1-min bars on a virtual clock, with 
 | `RISK_PCT` | `0.003` | risk as a fraction of capital |
 | `MAX_NOTIONAL` | `150000` | cap on one position |
 | `MAX_POSITIONS` | `3` | open positions at once |
-| `DAILY_LOSS_CAP` | `1000` | flatten and halt |
+| `DAILY_LOSS_CAP` | `1000` | flatten and halt when realised (worse of local and broker) + open MTM reaches −cap |
+| `MAX_TRADES_PER_DAY` | `0` | hard cap on entries per IST day; `0` = governor only |
+| `JEV_DAILY_TOKEN_BUDGET` | `0` | stop new Jev calls past this many tokens a day; `0` = unlimited |
 | `LIVE_QTY` | `0` | `1` forces one share; `0` uses the sizer |
 | `WILD` | `0` | `1` loosens gates |
 | `OPTIONS_MODE` | `off` | `on` enables the options leg |
@@ -122,33 +125,42 @@ Runs the real decision loop over that day's 1-min bars on a virtual clock, with 
 | `TELEGRAM_BOT_TOKEN` | | alert bot |
 | `TELEGRAM_CHAT_ID` | | alert chat |
 | `RSS_FEEDS` | | comma-separated news feeds |
-| `HOST` | `127.0.0.1` | dashboard bind address |
+| `HOST` | `127.0.0.1` | dashboard bind address; anything non-loopback needs `ALLOW_REMOTE_DASHBOARD=1` |
 | `PORT` | `8080` | dashboard port |
+| `ALLOW_REMOTE_DASHBOARD` | `0` | `1` permits a non-loopback `HOST`; every API call then needs the token |
+| `DASHBOARD_TOKEN` | random per start | token for dashboard writes; required (≥16 chars) in remote mode |
+| `DASHBOARD_ALLOWED_HOSTS` | | extra comma-separated hostnames/IPs accepted in the `Host` header |
 | `DB_PATH` | `data/harness.db` | SQLite file |
 | `KILL_PATH` | `kill.switch` | kill-switch file |
 
-`UNIVERSE`, `DAILY_FRICTION_BUDGET`, `ENTRIES_BASE`, `ENTRIES_MAX` are parsed but not read by the current code.
+Every numeric setting, enum, and entry window is validated at start; a typo stops the process with a list of problems instead of silently disabling a check.
+
+`risk.json` execution keys: `stopLimitBufferBps` (SL-L limit distance past the trigger, at least 3 ticks), `stopUnfilledMs` (how long a triggered or breached stop may stay unfilled before the engine forces a marketable exit), `marketableBps` (how far through the touch forced exits and flatten orders are priced; they are re-priced every 2 s until filled).
 
 ## Safety
 
 - Kill switch file (`KILL_PATH`) and dashboard Kill/Resume.
-- Exchange `SL-L` per position; the engine price stop runs only when none is resting.
-- `DAILY_LOSS_CAP` flattens and halts.
+- Exchange `SL-L` per position, sized to the filled quantity. A stop that fails to place is retried with backoff; if price breaches it or it triggers without filling for `stopUnfilledMs`, the engine alerts and forces a marketable exit.
+- Kill, halt, and flatten cancel working entries and keep re-pricing marketable exits every tick until the book is flat.
+- `DAILY_LOSS_CAP` flattens and halts on realised + open mark-to-market.
 - 15:10 flatten.
-- Margin check: required ≤ 80% of available.
+- Margin check: required ≤ 80% of available; kill/halt/window are re-checked after the margin call.
 - Observe mode for mock.
-- `ON_RESTART=adopt|flatten` — on start the engine cancels open orders it doesn't own and adopts MIS positions, so don't trade the same account by hand during a session.
-- Connectivity alert.
-- Dashboard is localhost-only.
+- An order whose placement times out is matched by tag on the next order-book poll instead of being assumed rejected.
+- A reconciler compares broker positions and orders with local state every 30 s and repairs a mismatch seen twice in a row.
+- `ON_RESTART=adopt|flatten` — on start the engine adopts MIS positions and their resting stops, cancels only its own stale orders, and alerts on orders it didn't place. Don't trade the same account by hand during a session.
+- An uncaught exception trips the kill switch, attempts a flatten, alerts, and exits non-zero for systemd to restart.
+- Connectivity and no-session alerts.
+- Dashboard binds to localhost by default; it checks `Host`/`Origin` headers and needs a token for every write.
 - Replay never writes the live DB.
 
 ## VPS
 
-NTP on. Bind stays localhost. `deploy/warren-duffer.service`. For Zerodha, update `.env` and restart the service every morning.
+NTP on. Bind stays localhost; reach the dashboard over an SSH tunnel. `deploy/warren-duffer.service` runs `tsx` as a dedicated `warren` user with `TZ=Asia/Kolkata` and a read-only filesystem except `data/`, where it pins `DB_PATH` and `KILL_PATH`; adjust `User=` and paths to your box. For Zerodha, update `.env` and restart the service every morning.
 
 ## Contributing
 
-Issues and PRs welcome. `pnpm typecheck` and `pnpm smoke` must pass. Never commit `.env` or `data/`. A new broker is `src/<broker>/client.ts` implementing `Broker`, plus a branch in `createBroker()`. Keep the engine broker-agnostic (`nse_cm`/`nse_fo`, bare NSE symbols, tags and order types mapped in the client). When changing normalisers, include redacted `pnpm probe` output.
+Issues and PRs welcome. `pnpm typecheck`, `pnpm test`, and `pnpm smoke` must pass (CI runs all three). Never commit `.env` or `data/`. A new broker is `src/<broker>/client.ts` implementing `Broker`, plus a branch in `createBroker()`. Keep the engine broker-agnostic (`nse_cm`/`nse_fo`, bare NSE symbols, tags and order types mapped in the client). When changing normalisers, include redacted `pnpm probe` output.
 
 ## License
 

@@ -5,7 +5,7 @@ export const EQUITY = {
   sttSellBps: 2.5,
   exchangeBps: 0.297,
   stampBuyBps: 0.3,
-  sebiBps: 0.1,
+  sebiBps: 0.01,
   gstOnCharges: 0.18,
   slippageBps: 1.5,
 };
@@ -14,7 +14,7 @@ export const OPTIONS = {
   sttSellPct: 0.001,
   exchangePct: 0.00035,
   stampPct: 0.00003,
-  sebiPct: 0.00001,
+  sebiPct: 0.000001,
   gstOnCharges: 0.18,
   spreadPct: 0.005,
 };
@@ -23,28 +23,6 @@ export function equityRoundTripBps(): number {
   const charges = EQUITY.exchangeBps * 2 + EQUITY.sebiBps * 2;
   const gst = charges * EQUITY.gstOnCharges;
   return EQUITY.sttSellBps + EQUITY.stampBuyBps + charges + gst + EQUITY.slippageBps;
-}
-
-export function estimateFriction(args: {
-  leg: Leg;
-  side: Side;
-  qty: number;
-  price: number;
-  isClosing: boolean;
-}): number {
-  const notional = args.qty * args.price;
-  if (args.leg === "equity") {
-    const bps = args.isClosing ? equityRoundTripBps() / 2 : equityRoundTripBps() / 2;
-    return (notional * bps) / 1e4;
-  }
-  const pct =
-    OPTIONS.sttSellPct * (args.side === "sell" ? 1 : 0) +
-    OPTIONS.exchangePct +
-    OPTIONS.stampPct * (args.side === "buy" ? 1 : 0) +
-    OPTIONS.sebiPct +
-    OPTIONS.spreadPct / 2;
-  const charges = notional * (OPTIONS.exchangePct + OPTIONS.sebiPct);
-  return notional * pct + charges * OPTIONS.gstOnCharges;
 }
 
 export function equityFillCost(side: Side, qty: number, price: number): number {
