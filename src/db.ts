@@ -9,6 +9,8 @@ mkdirSync(dirname(cfg.dbPath) === "." ? "data" : dirname(cfg.dbPath), { recursiv
 
 export const db = new Database(cfg.dbPath);
 db.pragma("journal_mode = WAL");
+// WAL + NORMAL: durable across process crashes, fsyncs only at checkpoints instead of every quote write.
+db.pragma("synchronous = NORMAL");
 db.pragma("busy_timeout = 3000");
 
 db.exec(`
@@ -324,6 +326,42 @@ export function todayPnl(): number {
 export function todayFriction(): number {
   const row = db.prepare("SELECT COALESCE(SUM(friction),0) AS f FROM trades WHERE date = ?").get(istDateStr()) as { f: number };
   return row.f;
+}
+
+/** Positions opened (filled or adopted) at or after `ms`; the MAX_TRADES_PER_DAY count. */
+export function positionsOpenedSince(ms: number): number {
+  return (db.prepare("SELECT COUNT(*) AS c FROM positions WHERE opened_at >= ?").get(ms) as { c: number }).c;
+}
+
+export interface PositionRow {
+  id: number;
+  opened_at: number;
+  leg: string;
+  symbol: string;
+  side: string;
+  qty: number;
+  entry: number;
+  stop: number;
+  target: number;
+  decision_id: number | null;
+  tier: string;
+  stop_bps: number | null;
+}
+
+export function openPositionRows(): PositionRow[] {
+  return db.prepare("SELECT * FROM positions WHERE closed = 0").all() as PositionRow[];
+}
+
+/** Mark DB positions the broker no longer holds as closed; returns how many. */
+export function closeStalePositions(keepIds: number[]): number {
+  const keep = new Set(keepIds);
+  let n = 0;
+  for (const r of openPositionRows()) {
+    if (keep.has(r.id)) continue;
+    db.prepare("UPDATE positions SET closed = 1 WHERE id = ?").run(r.id);
+    n++;
+  }
+  return n;
 }
 
 export function todayEntries(leg?: string): number {

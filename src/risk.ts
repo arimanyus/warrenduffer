@@ -1,6 +1,5 @@
 import { cfg, risk } from "./config.js";
-import { todayEntries, todayPnl } from "./db.js";
-import type { OpenPosition, PositionSide, Quote, Tier } from "./types.js";
+import type { OpenPosition, PositionSide, Quote, Side, Tier } from "./types.js";
 
 export function stopBps(atr1m: number, price: number): number | null {
   if (!price) return null;
@@ -40,28 +39,60 @@ export function roundTick(price: number, tick: number): number {
   return Math.round(Math.round(price / tick) * tick * 100) / 100;
 }
 
-export function canEnterMore(openCount: number): { ok: boolean; reason: string } {
+/** Snap to tick, never rounding toward the given direction's opposite (a marketable sell must not round up). */
+export function roundTickDir(price: number, tick: number, dir: "up" | "down"): number {
+  const t = tick || 0.01;
+  const steps = price / t;
+  // 1e-9 absorbs float residue so an exact multiple stays put.
+  const n = dir === "up" ? Math.ceil(steps - 1e-9) : Math.floor(steps + 1e-9);
+  return Math.round(n * t * 100) / 100;
+}
+
+/** Stop-limit price: at least 3 ticks, or stopLimitBufferBps, beyond the trigger. */
+export function stopLimitPrice(side: PositionSide, trigger: number, tick: number): number {
+  const t = tick || 0.05;
+  const buffer = Math.max(3 * t, (trigger * risk.stopLimitBufferBps) / 1e4);
+  return side === "long" ? roundTickDir(trigger - buffer, t, "down") : roundTickDir(trigger + buffer, t, "up");
+}
+
+/** A limit priced marketableBps through the touch (and at least one tick), so it fills like a market order with a cap. */
+export function marketablePrice(side: Side, q: Pick<Quote, "bid" | "ask" | "ltp" | "tickSize">): number {
+  const tick = q.tickSize || 0.05;
+  const bps = risk.marketableBps / 1e4;
+  if (side === "sell") {
+    const base = q.bid || q.ltp;
+    return Math.max(tick, roundTickDir(Math.min(base * (1 - bps), base - tick), tick, "down"));
+  }
+  const base = q.ask || q.ltp;
+  return roundTickDir(Math.max(base * (1 + bps), base + tick), tick, "up");
+}
+
+export function canEnterMore(openCount: number, dayPnl: number): { ok: boolean; reason: string } {
   if (openCount >= cfg.maxPositions) return { ok: false, reason: "max_positions" };
-  if (todayPnl() <= -cfg.dailyLossCap) return { ok: false, reason: "daily_loss_cap" };
+  if (dayPnl <= -cfg.dailyLossCap) return { ok: false, reason: "daily_loss_cap" };
   return { ok: true, reason: "" };
-}
-
-export function entriesUsed(): number {
-  return todayEntries();
-}
-
-export function optionLossToday(trades: { leg: string; pnl: number }[]): number {
-  return trades.filter((t) => t.leg === "options").reduce((s, t) => s + t.pnl, 0);
 }
 
 export function positionNotional(pos: OpenPosition): number {
   return pos.qty * pos.entryPrice;
 }
 
-export function unrealized(pos: OpenPosition, q: Quote): number {
+/** Gross P&L already booked by partial exits of a still-open position. */
+export function partialRealised(pos: OpenPosition): number {
+  const signed = pos.side === "long" ? 1 : -1;
+  return (pos.exitNotional - pos.closedQty * pos.entryPrice) * signed;
+}
+
+/** Mark-to-market of the still-open quantity only, at LTP (before charges). */
+export function openMtm(pos: OpenPosition, q: Quote): number {
   const px = q.ltp || (pos.side === "long" ? q.bid : q.ask);
   const signed = pos.side === "long" ? 1 : -1;
-  return (px - pos.entryPrice) * pos.qty * signed;
+  return (px - pos.entryPrice) * (pos.qty - pos.closedQty) * signed;
+}
+
+/** Whole-position P&L: booked partials plus the open remainder. Not for the loss cap, whose realised side already counts partials. */
+export function unrealized(pos: OpenPosition, q: Quote): number {
+  return partialRealised(pos) + openMtm(pos, q);
 }
 
 function clamp(x: number, lo: number, hi: number): number {

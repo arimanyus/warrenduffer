@@ -1,4 +1,4 @@
-import { insertSnapshot } from "../db.js";
+import { db, insertSnapshot } from "../db.js";
 import { applyQuoteToBar, seedBars } from "./bars.js";
 import type { Bar, Quote } from "../types.js";
 import type { Broker } from "../broker.js";
@@ -33,30 +33,41 @@ export class LiveFeed implements Feed {
       req.push({ token: t.token, segment: t.segment });
     }
     const qs = await this.client.quotes(req);
-    const byToken = new Map(uni.concat(active).map((t) => [t.token, t.symbol]));
-    for (const q of qs) {
-      const symbol = q.symbol || byToken.get(q.token) || q.token;
-      q.symbol = symbol;
-      this.quotes.set(symbol, q);
-      if (this.writeSnapshots) {
-        insertSnapshot({
-          ts: q.ts,
-          symbol,
-          token: q.token,
-          segment: q.segment,
-          ltp: q.ltp,
-          bid: q.bid,
-          ask: q.ask,
-          volume: q.volume,
-          tbq: q.tbq,
-          tsq: q.tsq,
-          bidQty: q.bids.reduce((s, l) => s + l.qty, 0),
-          askQty: q.asks.reduce((s, l) => s + l.qty, 0),
-          json: JSON.stringify({ bids: q.bids, asks: q.asks }),
-        });
-      }
-      if (this.writeBars) applyQuoteToBar(q);
+    // Positions, stops and the universe are keyed by the symbol we asked with; a broker's own symbol
+    // string ("RELIANCE-EQ", display names) would silently orphan the quote from its position.
+    const bySegToken = new Map<string, string>();
+    const byToken = new Map<string, string>();
+    for (const t of uni.concat(active)) {
+      bySegToken.set(`${t.segment}:${t.token}`, t.symbol);
+      if (!byToken.has(t.token)) byToken.set(t.token, t.symbol);
     }
+    const persist = db.transaction((rows: Quote[]) => {
+      for (const q of rows) {
+        if (this.writeSnapshots) {
+          insertSnapshot({
+            ts: q.ts,
+            symbol: q.symbol,
+            token: q.token,
+            segment: q.segment,
+            ltp: q.ltp,
+            bid: q.bid,
+            ask: q.ask,
+            volume: q.volume,
+            tbq: q.tbq,
+            tsq: q.tsq,
+            bidQty: q.bids.reduce((s, l) => s + l.qty, 0),
+            askQty: q.asks.reduce((s, l) => s + l.qty, 0),
+            json: JSON.stringify({ bids: q.bids, asks: q.asks }),
+          });
+        }
+        if (this.writeBars) applyQuoteToBar(q);
+      }
+    });
+    for (const q of qs) {
+      q.symbol = bySegToken.get(`${q.segment}:${q.token}`) ?? byToken.get(q.token) ?? (q.symbol || q.token);
+      this.quotes.set(q.symbol, q);
+    }
+    if (this.writeSnapshots || this.writeBars) persist(qs);
     return this.quotes;
   }
 }

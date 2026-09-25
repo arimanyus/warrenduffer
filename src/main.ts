@@ -1,17 +1,19 @@
-import { installCrashHandler } from "./alerts.js";
+import { alert, installCrashHandler } from "./alerts.js";
 import { brokerConfigured, cfg } from "./config.js";
 import { createBroker } from "./broker.js";
 import { Engine } from "./engine.js";
 import { startServer } from "./server.js";
-import { alert } from "./alerts.js";
-
-installCrashHandler();
 
 const client = createBroker(() => {
   void alert("session", cfg.broker === "zerodha" ? "kite session expired; run pnpm zerodha:login, set ZERODHA_ACCESS_TOKEN, restart. Entries halted" : "session expired and re-login failed; entries halted");
 });
 
 const engine = new Engine(client);
+
+installCrashHandler(async () => {
+  const flat = await engine.emergencyFlatten(12_000);
+  if (!flat) void alert("fatal", "process crashing with positions still open; flatten manually at the broker");
+});
 
 async function main(): Promise<void> {
   if (!brokerConfigured()) {

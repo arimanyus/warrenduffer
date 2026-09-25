@@ -1,6 +1,7 @@
 import { cfg, risk } from "../config.js";
 import type { OptionContract, Regime } from "../types.js";
 import { istParts } from "../time.js";
+import { roundTickDir } from "../risk.js";
 
 export type OptionSignal = { right: "CE" | "PE" } | null;
 
@@ -39,10 +40,11 @@ export function pickStrike(
   return otm ?? atm ?? null;
 }
 
-export function optionStops(entry: number): { stop: number; target: number } {
+/** Exchange-valid prices: an unrounded stop (e.g. 92.1399) is rejected by the broker. */
+export function optionStops(entry: number, tick = 0.05): { stop: number; target: number } {
   return {
-    stop: entry * (1 - risk.optionStopPct),
-    target: entry * (1 + risk.optionTargetPct),
+    stop: roundTickDir(entry * (1 - risk.optionStopPct), tick, "down"),
+    target: roundTickDir(entry * (1 + risk.optionTargetPct), tick, "up"),
   };
 }
 
