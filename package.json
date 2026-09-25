@@ -18,7 +18,8 @@
     "probe": "tsx scripts/probe.ts",
     "replay": "tsx scripts/replay.ts",
     "zerodha:login": "tsx scripts/zerodha-login.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts"
   },
   "engines": {
     "node": ">=20"
