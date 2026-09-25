@@ -4,7 +4,12 @@ import { cfg } from "../config.js";
 import { RateLimiter } from "../limiter.js";
 import { INDEX_TOKEN } from "../symbols.js";
 import type { Instrument, OptionContract, Quote, Side } from "../types.js";
+import { asArray, kotakRefusal, parseKotakCandles, parseKotakOrders, parseKotakPositions, pick } from "./parse.js";
 import { parseScripCsv } from "./scrip.js";
+
+/** Failed re-logins back off 30 s, doubling to 5 min, so a bad TOTP/MPIN cannot hammer the login endpoint. */
+const RELOGIN_BACKOFF_MS = 30_000;
+const RELOGIN_BACKOFF_MAX_MS = 5 * 60_000;
 
 const LOGIN = "https://mis.kotaksecurities.com/login/1.0/tradeApiLogin";
 const VALIDATE = "https://mis.kotaksecurities.com/login/1.0/tradeApiValidate";
@@ -30,6 +35,8 @@ export class KotakClient {
   private byToken = new Map<string, Instrument>();
   private foScrips: Instrument[] = [];
   private relogging = false;
+  private reloginFailures = 0;
+  private nextReloginAt = 0;
 
   constructor(
     private onSessionExpired?: () => void,
@@ -78,13 +85,17 @@ export class KotakClient {
   }
 
   async reloginOnce(): Promise<boolean> {
-    if (this.relogging) return false;
+    if (this.relogging || Date.now() < this.nextReloginAt) return false;
     this.relogging = true;
     try {
       this.session = null;
       await this.login();
+      this.reloginFailures = 0;
+      this.nextReloginAt = 0;
       return true;
     } catch {
+      this.reloginFailures++;
+      this.nextReloginAt = Date.now() + Math.min(RELOGIN_BACKOFF_MAX_MS, RELOGIN_BACKOFF_MS * 2 ** (this.reloginFailures - 1));
       this.onSessionExpired?.();
       return false;
     } finally {
@@ -107,8 +118,10 @@ export class KotakClient {
       const isCm = u.includes("nse_cm");
       const isFo = u.includes("nse_fo");
       if (!isCm && !isFo) continue;
-      await this.limiter.takeRequest();
-      const text = await fetch(url).then((r) => r.text());
+      await this.limiter.takeRequest(true);
+      const r = await fetch(url, { signal: AbortSignal.timeout(60_000) });
+      if (!r.ok) throw new KotakError(`scrip master ${r.status} for ${url}`, r.status);
+      const text = await r.text();
       const parsed = parseScripCsv(text, isCm ? "nse_cm" : "nse_fo");
       if (isCm) {
         for (const i of parsed) {
@@ -149,7 +162,7 @@ export class KotakClient {
     const sess = await this.ensureSession();
     const out: Quote[] = [];
     for (const chunk of chunks(tokens, 25)) {
-      await this.limiter.takeRequest();
+      await this.limiter.takeRequest(true);
       const neo = chunk.map((t) => encodeURIComponent(`${t.segment}|${t.token}`)).join(",");
       const url = `${sess.baseUrl}/script-details/1.0/quotes/neosymbol/${neo}/all`;
       const res = await this.authed("GET", url, { headers: this.tokenHeaders(), order: false });
@@ -163,37 +176,16 @@ export class KotakClient {
     { ts: number; open: number; high: number; low: number; close: number; volume: number }[]
   > {
     const sess = await this.ensureSession();
-    await this.limiter.takeRequest();
+    await this.limiter.takeRequest(true);
     const neo = encodeURIComponent(`${segment}|${token}`);
     const url = `${sess.baseUrl}/market-data/1.0/historical/details?neosymbol=${neo}&fromdate=${from}&todate=${to}&interval=${interval}`;
     const res = await this.authed("GET", url, { headers: this.tokenHeaders(), order: false });
-    const rows = (pick(res, ["data.candles", "candles", "data"]) as unknown[]) ?? [];
-    return (Array.isArray(rows) ? rows : []).map((r) => {
-      if (Array.isArray(r)) {
-        return {
-          ts: Date.parse(String(r[0])),
-          open: Number(r[1]),
-          high: Number(r[2]),
-          low: Number(r[3]),
-          close: Number(r[4]),
-          volume: Number(r[5] ?? 0),
-        };
-      }
-      const o = r as Record<string, unknown>;
-      return {
-        ts: Date.parse(String(o.time ?? o.timestamp ?? o.datetime)),
-        open: Number(o.open),
-        high: Number(o.high),
-        low: Number(o.low),
-        close: Number(o.close),
-        volume: Number(o.volume ?? o.qty ?? 0),
-      };
-    }).filter((c) => Number.isFinite(c.ts) && Number.isFinite(c.close));
+    return parseKotakCandles(res);
   }
 
   async expiries(underlying = "NIFTY"): Promise<string[]> {
     const sess = await this.ensureSession();
-    await this.limiter.takeRequest();
+    await this.limiter.takeRequest(true);
     const url = `${sess.baseUrl}/market-data/1.0/watchlist/expiries?underlying=${underlying}&exchange=nse_fo&instrument_type=option`;
     const res = await this.authed("GET", url, { headers: this.tokenHeaders(), order: false });
     const list = pick(res, ["data.expiries", "data", "expiries"]) ?? [];
@@ -203,7 +195,7 @@ export class KotakClient {
 
   async optionChain(underlying = "NIFTY", expiry?: string): Promise<OptionContract[]> {
     const sess = await this.ensureSession();
-    await this.limiter.takeRequest();
+    await this.limiter.takeRequest(true);
     let url = `${sess.baseUrl}/market-data/1.0/watchlist/option-chain?exchange=nse_fo&underlying=${underlying}&instrument_type=option&count=20`;
     if (expiry) url += `&expiry=${expiry}`;
     const res = await this.authed("GET", url, { headers: this.tokenHeaders(), order: false });
@@ -355,22 +347,28 @@ export class KotakClient {
       dd: "NA",
     };
     if (args.token) jData.tk = args.token;
-    return this.authed("POST", `${sess.baseUrl}/quick/order/vr/modify`, {
+    const res = await this.authed("POST", `${sess.baseUrl}/quick/order/vr/modify`, {
       headers: this.sessionFormHeaders(),
       body: form({ jData: JSON.stringify(jData) }),
       order: true,
     });
+    const refused = kotakRefusal(res);
+    if (refused) throw new KotakError(`modify refused: ${refused}`, 200, res);
+    return res;
   }
 
   async cancel(orderId: string): Promise<unknown> {
     const sess = await this.ensureSession();
     await this.limiter.takeOrder();
     const jData = { no: orderId };
-    return this.authed("POST", `${sess.baseUrl}/quick/order/cancel`, {
+    const res = await this.authed("POST", `${sess.baseUrl}/quick/order/cancel`, {
       headers: this.sessionFormHeaders(),
       body: form({ jData: JSON.stringify(jData) }),
       order: true,
     });
+    const refused = kotakRefusal(res);
+    if (refused) throw new KotakError(`cancel refused: ${refused}`, 200, res);
+    return res;
   }
 
   async orders(): Promise<BrokerOrder[]> {
@@ -380,21 +378,7 @@ export class KotakClient {
       headers: this.sessionHeaders(),
       order: false,
     });
-    return asArray(pick(res, ["data", "ord"]) ?? res).map((row) => {
-      const r = row as Record<string, unknown>;
-      return {
-        orderId: String(r.nOrdNo ?? r.norentm ?? r.orderId ?? ""),
-        symbol: String(r.trdSym ?? r.ts ?? r.tradingSymbol ?? "").replace(/-EQ$/i, ""),
-        status: String(r.ordSt ?? r.status ?? r.st ?? ""),
-        qty: Number(r.qty ?? r.qt ?? 0),
-        filledQty: Number(r.fldQty ?? r.filledQty ?? 0),
-        price: Number(r.prc ?? r.avgPrc ?? r.price ?? 0),
-        trigger: Number(r.trgPrc ?? r.trigger ?? 0),
-        side: (String(r.trnsTp ?? r.tt ?? "").toUpperCase().startsWith("S") ? "sell" : "buy") as Side,
-        product: String(r.prod ?? r.pc ?? "MIS"),
-        tag: String(r.usrId ?? r.ig ?? r.tag ?? ""),
-      };
-    }).filter((o) => o.orderId);
+    return parseKotakOrders(res);
   }
 
   async positions(): Promise<BrokerPosition[]> {
@@ -404,19 +388,7 @@ export class KotakClient {
       headers: this.sessionHeaders(),
       order: false,
     });
-    return asArray(pick(res, ["data", "pos"]) ?? res).map((row) => {
-      const r = row as Record<string, unknown>;
-      const buy = Number(r.flBuyQty ?? r.buyQty ?? 0);
-      const sell = Number(r.flSellQty ?? r.sellQty ?? 0);
-      return {
-        symbol: String(r.trdSym ?? r.ts ?? r.tradingSymbol ?? "").replace(/-EQ$/i, ""),
-        token: String(r.tok ?? r.tk ?? r.token ?? ""),
-        segment: String(r.exSeg ?? r.es ?? "nse_cm"),
-        qty: buy - sell || Number(r.netQty ?? r.qty ?? 0),
-        avgPrice: Number(r.avgPrc ?? r.avgPrice ?? 0),
-        product: String(r.prod ?? r.pc ?? "MIS"),
-      };
-    }).filter((p) => p.qty !== 0);
+    return parseKotakPositions(res);
   }
 
   async limits(): Promise<{ available: number; raw: unknown }> {
@@ -539,31 +511,6 @@ function levels(raw: unknown): { price: number; qty: number }[] {
       return { price: Number(o.price ?? o.p ?? 0), qty: Number(o.quantity ?? o.qty ?? o.q ?? 0) };
     })
     .filter((l) => l.price > 0);
-}
-
-function pick(obj: unknown, paths: string[]): unknown {
-  for (const p of paths) {
-    let cur: unknown = obj;
-    for (const k of p.split(".")) {
-      if (cur && typeof cur === "object" && k in (cur as object)) cur = (cur as Record<string, unknown>)[k];
-      else {
-        cur = undefined;
-        break;
-      }
-    }
-    if (cur !== undefined && cur !== null && cur !== "") return cur;
-  }
-  return undefined;
-}
-
-function asArray(v: unknown): unknown[] {
-  if (Array.isArray(v)) return v;
-  if (v && typeof v === "object") {
-    const o = v as Record<string, unknown>;
-    if (Array.isArray(o.data)) return o.data;
-    if (Array.isArray(o.message)) return o.message;
-  }
-  return [];
 }
 
 function chunks<T>(arr: T[], n: number): T[][] {

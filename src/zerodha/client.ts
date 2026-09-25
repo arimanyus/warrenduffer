@@ -3,7 +3,7 @@ import type { Broker, BrokerOrder, BrokerPosition, MarginCheck, PlaceResult, Ses
 import { cfg } from "../config.js";
 import { RateLimiter } from "../limiter.js";
 import { INDEX_SYMBOL, INDEX_TOKEN } from "../symbols.js";
-import { istDateStr } from "../time.js";
+import { istDateStr, parseIstTimestamp } from "../time.js";
 import type { BookLevel, Instrument, OptionContract, Quote, Side } from "../types.js";
 import { buildInstruments } from "./instruments.js";
 
@@ -265,7 +265,7 @@ export function loginUrl(apiKey: string): string {
   return `https://kite.zerodha.com/connect/login?v=3&api_key=${encodeURIComponent(apiKey)}`;
 }
 
-/** Kite tags are ≤20 alphanumeric chars. Only the stop prefix must round-trip: reconcile() keeps open orders tagged "sl-". */
+/** Kite tags are ≤20 alphanumeric chars. Engine tags ("wd…") already conform; "sl-N" is from earlier versions. */
 export function kiteTag(tag: string): string {
   return tag.replace(/^sl-/, "SL").replace(/[^A-Za-z0-9]/g, "").slice(0, 20);
 }
@@ -335,11 +335,13 @@ export function parseOrders(data: unknown): BrokerOrder[] {
     .filter((o) => o.orderId);
 }
 
+/** Net positions including flat rows: a closed round trip still carries the day's `realised` P&L. */
 export function parsePositions(data: unknown): BrokerPosition[] {
   const net = (data as { net?: unknown[] } | null)?.net;
   return (Array.isArray(net) ? net : [])
     .map((row): BrokerPosition => {
       const r = row as Record<string, unknown>;
+      const realised = Number(r.realised);
       return {
         symbol: String(r.tradingsymbol ?? ""),
         token: String(r.instrument_token ?? ""),
@@ -347,9 +349,10 @@ export function parsePositions(data: unknown): BrokerPosition[] {
         qty: Number(r.quantity ?? 0),
         avgPrice: Number(r.average_price ?? 0),
         product: String(r.product ?? "MIS"),
+        realisedPnl: r.realised === undefined || r.realised === null || !Number.isFinite(realised) ? undefined : realised,
       };
     })
-    .filter((p) => p.qty !== 0 && p.segment);
+    .filter((p) => p.segment);
 }
 
 export function parseCandles(data: unknown): Candle[] {
@@ -358,7 +361,7 @@ export function parseCandles(data: unknown): Candle[] {
     .map((r) => {
       const a = r as unknown[];
       return {
-        ts: Date.parse(String(a[0])),
+        ts: parseIstTimestamp(a[0]),
         open: Number(a[1]),
         high: Number(a[2]),
         low: Number(a[3]),

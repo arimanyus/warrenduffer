@@ -34,6 +34,8 @@ export interface BrokerPosition {
   qty: number;
   avgPrice: number;
   product: string;
+  /** Broker-computed realised P&L for the day on this row (gross of charges), when the broker reports it. */
+  realisedPnl?: number;
 }
 
 export interface MarginCheck {
