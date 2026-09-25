@@ -1,4 +1,18 @@
 const $ = (id) => document.getElementById(id);
+
+// Loopback dashboards embed the token; remote ones never do, so ask once and remember it.
+const embeddedToken = document.querySelector('meta[name="wd-token"]')?.content;
+const TOKEN =
+  embeddedToken ||
+  localStorage.getItem("wdToken") ||
+  (() => {
+    const t = (prompt("dashboard token (DASHBOARD_TOKEN)") || "").trim();
+    if (t) localStorage.setItem("wdToken", t);
+    return t;
+  })();
+const api = (path, opts = {}) => fetch(path, { ...opts, headers: { ...(opts.headers || {}), "x-wd-token": TOKEN } });
+const post = (path, body) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body ?? {}) });
+
 const capInput = $("capital");
 let capFocused = false;
 
@@ -62,7 +76,7 @@ const barTime = (i) => {
 };
 
 function replayCmd(body) {
-  fetch("/api/replay", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  post("/api/replay", body);
 }
 $("rpPlay").onclick = () => replayCmd({ paused: $("rpPlay").textContent === "PAUSE" });
 $("rpSpeeds").onclick = (e) => {
@@ -249,20 +263,20 @@ function drawCurve(pts) {
 
 $("kill").onclick = () => {
   if (prompt("type CONFIRM to cancel all entries and flatten") !== "CONFIRM") return;
-  fetch("/api/kill", { method: "POST" });
+  post("/api/kill");
 };
 $("jev").onclick = () => {
   const paused = !$("jev").classList.contains("on");
-  fetch("/api/jev", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paused }) });
+  post("/api/jev", { paused });
 };
 $("wild").onclick = () => {
   const on = !$("wild").classList.contains("on");
   if (on && prompt("WILD: enter on stage-1 conviction alone, up to the position cap per cycle, no re-entry cooldown. Type WILD to enable.") !== "WILD") return;
-  fetch("/api/wild", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ on }) });
+  post("/api/wild", { on });
 };
 $("unkill").onclick = () => {
   if (prompt("type RESUME to clear the kill switch") !== "RESUME") return;
-  fetch("/api/unkill", { method: "POST" });
+  post("/api/unkill");
 };
 
 $("capForm").onsubmit = (e) => {
@@ -272,7 +286,7 @@ $("capForm").onsubmit = (e) => {
     $("capMsg").textContent = "min 1000";
     return;
   }
-  fetch("/api/capital", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ capital }) })
+  post("/api/capital", { capital })
     .then((r) => r.json())
     .then((j) => {
       $("capMsg").textContent = j.ok ? `set ${j.capital}` : "failed";
@@ -299,7 +313,7 @@ $("tabs").onclick = (e) => {
 const pendingOpen = new Set();
 
 function loadSessions() {
-  fetch("/api/sessions")
+  api("/api/sessions")
     .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
     .then(renderSessions)
     .catch(() => {
@@ -369,7 +383,7 @@ $("sessions").onclick = (e) => {
     const wild = $("wild").classList.contains("on");
     play.disabled = true;
     pendingOpen.add(date);
-    fetch("/api/sessions/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date, speed, wild }) })
+    post("/api/sessions/start", { date, speed, wild })
       .then((r) => r.json())
       .then(() => {
         loadSessions();
@@ -383,13 +397,13 @@ $("sessions").onclick = (e) => {
   }
   const stop = e.target.closest("button[data-stop]");
   if (stop) {
-    fetch("/api/sessions/stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date: stop.dataset.stop }) }).then(loadSessions);
+    post("/api/sessions/stop", { date: stop.dataset.stop }).then(loadSessions);
   }
 };
 setInterval(() => {
   if (tab === "sessions") loadSessions();
 }, 3000);
 
-const es = new EventSource("/events");
+const es = new EventSource(embeddedToken ? "/events" : `/events?token=${encodeURIComponent(TOKEN)}`);
 es.onmessage = (e) => render(JSON.parse(e.data));
-fetch("/api/state").then((r) => r.json()).then(render).catch(() => {});
+api("/api/state").then((r) => r.json()).then(render).catch(() => {});
