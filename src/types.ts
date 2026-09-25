@@ -159,6 +159,12 @@ export interface OpenPosition {
   mfeBps: number;
   lastVerdict?: string;
   exitVotes: number;
+  /** Earliest time a missing exchange stop may be placed again. */
+  stopRetryAt: number;
+  /** First time the stop was seen breached (LTP through trigger or broker-reported trigger) while still unfilled. */
+  stopBreachAt: number;
+  /** Per-position stop placement counter, keeps each stop tag unique. */
+  stopSeq: number;
 }
 
 export interface WorkingOrder {
@@ -184,7 +190,18 @@ export interface WorkingOrder {
   stop: number | null;
   target: number | null;
   stopBps: number | null;
-  tif?: "MKT" | "LMT";
+  tradingSymbol: string;
+  orderType: "L" | "SL-L";
+  /** Forced exit: kept priced through the touch and re-priced until it fills. */
+  marketable: boolean;
+  /** False while a place() outcome is unknown (e.g. timeout after send). The poll matches it by tag. */
+  confirmed: boolean;
+  /** Stop orders: when the broker first reported the trigger hit but the order still unfilled. */
+  triggeredAt: number | null;
+  /** A cancel was asked for while unconfirmed; it is sent as soon as the broker id is known. */
+  cancelRequested: boolean;
+  /** Exit reason for exit/stop orders (tags are compacted for brokers and cannot carry it). */
+  reason: string | null;
 }
 
 export interface GovernorState {

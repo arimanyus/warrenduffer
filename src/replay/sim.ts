@@ -2,6 +2,7 @@ import type { Broker, BrokerOrder, BrokerPosition, MarginCheck, PlaceResult, Ses
 import { risk } from "../config.js";
 import { barTs } from "../data/bars.js";
 import { db, insertEvent } from "../db.js";
+import { recordFill, recordOrder, setOrderStatus } from "../executor/record.js";
 import type { Executor, Fill, PlaceIntent } from "../executor/types.js";
 import { fillCost } from "../costs.js";
 import { INDEX_TOKEN, NIFTY50 } from "../symbols.js";
@@ -113,7 +114,8 @@ export class SimBroker implements Broker {
 /**
  * Bar-based fills. Orders placed on bar t are judged on a later bar only.
  * Limits fill at the limit if the bar trades through, or at the open if it gaps through.
- * Stops fill at the trigger, or at the open on a gap. Prices never leave the bar's [low, high].
+ * Stop-limits trigger when the bar crosses the trigger; a gap through the limit leaves them resting
+ * as a limit (the engine's unfilled-stop watchdog then takes over). Prices never leave [low, high].
  */
 export class SimExecutor implements Executor {
   name = "sim";
@@ -124,58 +126,15 @@ export class SimExecutor implements Executor {
 
   async place(intent: PlaceIntent): Promise<WorkingOrder> {
     const brokerId = `sim-${++this.seq}`;
-    const info = db
-      .prepare(
-        `INSERT INTO orders (broker_id, ts, symbol, token, segment, side, qty, price, trigger_price, kind, status, tag, last_modify_at, decision_id, leg, tier, stop, target, stop_bps)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        brokerId,
-        clock.now(),
-        intent.symbol,
-        intent.token,
-        intent.segment,
-        intent.side,
-        intent.qty,
-        intent.price,
-        intent.trigger ?? null,
-        intent.kind,
-        intent.tag,
-        clock.now(),
-        intent.decisionId,
-        intent.leg,
-        intent.tier,
-        intent.stop ?? null,
-        intent.target ?? null,
-        intent.stopBps ?? null,
-      );
-    const order: WorkingOrder = {
-      id: Number(info.lastInsertRowid),
-      brokerId,
-      symbol: intent.symbol,
-      token: intent.token,
-      segment: intent.segment,
-      side: intent.side,
-      qty: intent.qty,
-      price: intent.price,
-      trigger: intent.trigger ?? null,
-      kind: intent.kind,
-      status: "open",
-      tag: intent.tag,
-      placedAt: clock.now(),
-      lastModifyAt: clock.now(),
-      filledQty: 0,
-      requotes: 0,
-      decisionId: intent.decisionId,
-      leg: intent.leg,
-      tier: intent.tier,
-      stop: intent.stop ?? null,
-      target: intent.target ?? null,
-      stopBps: intent.stopBps ?? null,
-      tif: intent.tif ?? "LMT",
-    };
+    const order = recordOrder(intent, brokerId);
     this.orders.set(order.id, order);
     insertEvent("order", `${intent.kind} ${intent.side} ${intent.qty} ${intent.symbol} @${intent.price}${intent.trigger ? ` trg ${intent.trigger}` : ""} ${brokerId}`);
+    return order;
+  }
+
+  adopt(intent: PlaceIntent, brokerId: string, filledQty: number): WorkingOrder {
+    const order = recordOrder(intent, brokerId, filledQty);
+    this.orders.set(order.id, order);
     return order;
   }
 
@@ -210,24 +169,17 @@ export class SimExecutor implements Executor {
       this.lastBarTs.set(barKey, qBar);
       const px = fillAgainstBar(order, q);
       if (px !== null && px > 0) {
-        const cost = fillCost(order.leg, order.side, order.qty, px);
+        const qty = order.qty - order.filledQty;
+        const cost = fillCost(order.leg, order.side, qty, px);
         order.filledQty = order.qty;
-        order.status = "filled";
-        db.prepare("UPDATE orders SET status='filled', price=? WHERE id=?").run(px, order.id);
-        db.prepare("INSERT INTO fills (ts, order_id, symbol, side, qty, price, cost, simulated) VALUES (?,?,?,?,?,?,?,1)").run(
-          clock.now(),
-          order.id,
-          order.symbol,
-          order.side,
-          order.qty,
-          px,
-          cost,
-        );
+        setOrderStatus(order, "filled", px);
+        recordFill(order, qty, px, cost, true);
         this.orders.delete(order.id);
-        insertEvent("fill", `${order.kind} ${order.side} ${order.qty} ${order.symbol} @${px} (sim)`);
-        this.onFill?.({ order, qty: order.qty, price: px, cost });
+        insertEvent("fill", `${order.kind} ${order.side} ${qty} ${order.symbol} @${px} (sim)`);
+        this.onFill?.({ order, qty, price: px, cost });
         continue;
       }
+      if (order.kind === "stop" && order.triggeredAt === null && stopTriggered(order, q)) order.triggeredAt = clock.now();
       if (order.kind === "entry" && clock.now() - order.placedAt > risk.entryCancelMs) await this.cancel(order);
     }
   }
@@ -238,19 +190,25 @@ export function fillAgainstBar(order: WorkingOrder, q: Quote): number | null {
   const open = q.open || q.ltp;
   const high = q.high || Math.max(open, q.close || q.ltp);
   const low = q.low || Math.min(open, q.close || q.ltp);
-  const market = order.tif === "MKT" || isForcedExit(order);
   let raw: number | null = null;
 
-  if (order.kind === "stop" && order.trigger !== null) {
-    if (order.side === "sell") {
-      if (low > order.trigger) return null;
-      raw = open <= order.trigger ? open : order.trigger;
+  const untriggeredStop = order.kind === "stop" && order.trigger !== null && order.triggeredAt === null;
+  if (untriggeredStop && order.trigger !== null) {
+    const t = order.trigger;
+    if (!stopTriggered(order, q)) return null;
+    const gapped = order.side === "sell" ? open <= t : open >= t;
+    if (!gapped) {
+      raw = t;
+    } else if (order.side === "sell") {
+      // Triggered at the open; it is now a sell limit at `price`.
+      if (open >= order.price) raw = open;
+      else if (high >= order.price) raw = order.price;
+      else return null;
     } else {
-      if (high < order.trigger) return null;
-      raw = open >= order.trigger ? open : order.trigger;
+      if (open <= order.price) raw = open;
+      else if (low <= order.price) raw = order.price;
+      else return null;
     }
-  } else if (market) {
-    raw = open;
   } else if (order.side === "buy") {
     if (low > order.price) return null;
     raw = open <= order.price ? open : order.price;
@@ -259,12 +217,15 @@ export function fillAgainstBar(order: WorkingOrder, q: Quote): number | null {
     raw = open >= order.price ? open : order.price;
   }
 
-  if (raw === null) return null;
   return round2(Math.min(high, Math.max(low, raw)));
 }
 
-function isForcedExit(order: WorkingOrder): boolean {
-  return order.kind === "exit" && /-(flatten|halt|kill)$/.test(order.tag);
+function stopTriggered(order: WorkingOrder, q: Quote): boolean {
+  if (order.trigger === null) return false;
+  const open = q.open || q.ltp;
+  const high = q.high || Math.max(open, q.close || q.ltp);
+  const low = q.low || Math.min(open, q.close || q.ltp);
+  return order.side === "sell" ? low <= order.trigger : high >= order.trigger;
 }
 
 function round2(x: number): number {
